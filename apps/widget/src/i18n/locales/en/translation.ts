@@ -1,0 +1,104 @@
+const translation = {
+  brand: {
+    title: "CIET AI Assistant",
+    subtitle: "Official College Assistant · Online",
+    logoAlt: "CIET assistant",
+  },
+  launcher: {
+    tooltip: "Ask CIET AI",
+    open: "Open CIET AI Assistant",
+  },
+  header: {
+    dialog: "CIET AI Assistant",
+    resize: "Resize assistant",
+    language: "Language",
+    minimize: "Minimize assistant",
+    restore: "Restore assistant",
+    close: "Close assistant",
+  },
+  language: {
+    en: "English",
+    te: "తెలుగు",
+    hi: "हिन्दी",
+  },
+  welcome: {
+    message:
+      "Hello.\n\nI am CIET AI Assistant.\n\nI can help you with admissions, placements, departments, scholarships, campus facilities, and official college information.\n\nHow can I help you today?",
+  },
+  trust: "Grounded in verified CIET information",
+  starters: {
+    title: "Popular questions",
+    courses: "What courses are available?",
+    admissions: "How do admissions work?",
+    hostel: "Is hostel available?",
+  },
+  actions: {
+    admissions: {
+      label: "Admissions",
+      prompt: "Tell me about admissions",
+    },
+    courses: {
+      label: "Courses",
+      prompt: "Tell me about courses",
+    },
+    placements: {
+      label: "Placements",
+      prompt: "Tell me about placements",
+    },
+    hostel: {
+      label: "Hostel",
+      prompt: "Tell me about hostel facilities",
+    },
+    transport: {
+      label: "Transport",
+      prompt: "Tell me about transport",
+    },
+    scholarships: {
+      label: "Scholarships",
+      prompt: "Tell me about scholarships",
+    },
+    departments: {
+      label: "Departments",
+      prompt: "Tell me about departments",
+    },
+    events: {
+      label: "Events",
+      prompt: "Tell me about events",
+    },
+    contact: {
+      label: "Contact Information",
+      prompt: "Share CIET contact information",
+    },
+  },
+  chat: {
+    placeholder: "Ask about CIET...",
+    messageAria: "Message CIET AI",
+    send: "Send message",
+    loading: "CIET AI is preparing an answer",
+  },
+  errors: {
+    connection: "I could not reach CIET AI. Please check your connection and try again.",
+    feedback: "Feedback was saved locally and will be retried later.",
+    previewMount: "CIET AI preview failed to mount. Open the browser console for details.",
+  },
+  messageActions: {
+    copy: "Copy answer",
+    copied: "Answer copied",
+    regenerate: "Regenerate answer",
+    helpful: "Helpful answer",
+    unhelpful: "Unhelpful answer",
+  },
+  confidence: {
+    verified: "Verified",
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+  },
+  footer: {
+    clear: "Clear chat",
+    note: "AI answers include confidence and sources",
+    privacy: "Privacy",
+  },
+};
+
+export default translation;
