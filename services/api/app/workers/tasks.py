@@ -30,6 +30,7 @@ async def _process_document(document_id: str, content: bytes, filename: str) -> 
             text = extract_text(filename, content)
             job.status = "chunking"
             job.progress = 45
+            await asyncio.to_thread(PineconeService(settings).delete_document, document_id)
             await session.execute(DocumentChunk.__table__.delete().where(DocumentChunk.document_id == document_id))
             chunks = [
                 DocumentChunk(

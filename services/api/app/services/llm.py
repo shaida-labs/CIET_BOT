@@ -24,6 +24,7 @@ class LLMService:
                 "I found relevant CIET source material, but AI generation is not configured. "
                 "Please configure OPENAI_API_KEY to enable generated answers.",
                 verified=False,
+                language=language,
             )
 
         response = await self.client.responses.create(
@@ -41,7 +42,7 @@ class LLMService:
                 },
             ],
         )
-        return sanitize_answer(query, response.output_text, verified=False)
+        return sanitize_answer(query, response.output_text, verified=False, language=language)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.client:

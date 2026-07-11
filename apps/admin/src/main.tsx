@@ -118,7 +118,40 @@ function Documents() {
     await load();
     setBusy(false);
   };
-  return <Card title="Document Upload"><div className="toolbar"><label className="upload"><UploadCloud /> Upload PDF, DOCX, XLSX, CSV<input type="file" hidden accept=".pdf,.docx,.xlsx,.csv,.txt,.md" onChange={(e) => void upload(e.target.files?.[0])} /></label><button onClick={() => client.refreshKnowledge()}><RefreshCw size={15} /> Refresh Knowledge</button></div><Table rows={docs.map((d) => [d.title, d.mime_type, d.status, new Date(d.uploaded_at).toLocaleString()])} empty={busy ? "Uploading..." : "No documents uploaded yet."} /></Card>;
+  const deleteDoc = async (id: string) => {
+    if (confirm("Are you sure you want to delete this document?")) {
+      await client.deleteDocument(id);
+      await load();
+    }
+  };
+  const reprocessDoc = async (id: string) => {
+    await client.reprocessDocument(id);
+    await load();
+  };
+  return (
+    <Card title="Document Upload">
+      <div className="toolbar">
+        <label className="upload">
+          <UploadCloud /> Upload PDF, DOCX, XLSX, CSV
+          <input type="file" hidden accept=".pdf,.docx,.xlsx,.csv,.txt,.md" onChange={(e) => void upload(e.target.files?.[0])} />
+        </label>
+        <button onClick={() => client.refreshKnowledge()}><RefreshCw size={15} /> Refresh Knowledge</button>
+      </div>
+      <Table
+        rows={docs.map((d) => [
+          d.title,
+          d.mime_type,
+          d.status,
+          new Date(d.uploaded_at).toLocaleString(),
+          <div style={{ display: "flex", gap: "8px" }} key={d.id}>
+            <button onClick={() => void reprocessDoc(d.id)} className="ghost" style={{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", height: "auto", border: "1px solid #174f43", color: "#174f43", background: "#e8f2e6" }}>Reprocess</button>
+            <button onClick={() => void deleteDoc(d.id)} style={{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", height: "auto", background: "#d32f2f", color: "white", border: 0 }}>Delete</button>
+          </div>
+        ])}
+        empty={busy ? "Uploading..." : "No documents uploaded yet."}
+      />
+    </Card>
+  );
 }
 
 function Faqs() {
@@ -128,7 +161,13 @@ function Faqs() {
   const load = () => client.faqs().then(setItems);
   useEffect(() => { void load(); }, []);
   const save = async () => { await client.createFaq({ question, answer, language: "en", source: "Verified FAQ", is_active: true }); setQuestion(""); setAnswer(""); await load(); };
-  return <Card title="FAQ Management"><Form question={question} answer={answer} setQuestion={setQuestion} setAnswer={setAnswer} save={save} /><Table rows={items.map((i) => [i.question, i.language, i.source, new Date(i.updated_at).toLocaleDateString()])} empty="No FAQs yet." /></Card>;
+  const deleteFaq = async (id: string) => {
+    if (confirm("Are you sure you want to delete this FAQ?")) {
+      await client.deleteFaq(id);
+      await load();
+    }
+  };
+  return <Card title="FAQ Management"><Form question={question} answer={answer} setQuestion={setQuestion} setAnswer={setAnswer} save={save} /><Table rows={items.map((i) => [i.question, i.language, i.source, new Date(i.updated_at).toLocaleDateString(), <button key={i.id} onClick={() => void deleteFaq(i.id)} style={{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", height: "auto", background: "#d32f2f", color: "white", border: 0 }}>Delete</button>])} empty="No FAQs yet." /></Card>;
 }
 
 function Metrics() {
@@ -138,7 +177,13 @@ function Metrics() {
   const load = () => client.metrics().then(setItems);
   useEffect(() => { void load(); }, []);
   const save = async () => { await client.createMetric({ name, value, verified_by: "Admin", source: "Verified Metrics", is_sensitive_stat: true }); setName(""); setValue(""); await load(); };
-  return <Card title="Metrics Management"><div className="form"><input placeholder="Metric name" value={name} onChange={(e) => setName(e.target.value)} /><input placeholder="Verified value" value={value} onChange={(e) => setValue(e.target.value)} /><button onClick={save}><Plus size={15} /> Add Metric</button></div><Table rows={items.map((i) => [i.name, i.value, i.verified_by, new Date(i.updated_at).toLocaleDateString()])} empty="No metrics yet." /></Card>;
+  const deleteMetric = async (id: string) => {
+    if (confirm("Are you sure you want to delete this Metric?")) {
+      await client.deleteMetric(id);
+      await load();
+    }
+  };
+  return <Card title="Metrics Management"><div className="form"><input placeholder="Metric name" value={name} onChange={(e) => setName(e.target.value)} /><input placeholder="Verified value" value={value} onChange={(e) => setValue(e.target.value)} /><button onClick={save}><Plus size={15} /> Add Metric</button></div><Table rows={items.map((i) => [i.name, i.value, i.verified_by, new Date(i.updated_at).toLocaleDateString(), <button key={i.id} onClick={() => void deleteMetric(i.id)} style={{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", height: "auto", background: "#d32f2f", color: "white", border: 0 }}>Delete</button>])} empty="No metrics yet." /></Card>;
 }
 
 function Logs() {
@@ -163,9 +208,9 @@ function Stat({ label, value, icon: Icon }: { label: string; value: string | num
   return <section className="stat"><Icon /><span>{label}</span><strong>{value}</strong></section>;
 }
 
-function Table({ rows, empty }: { rows: string[][]; empty: string }) {
+function Table({ rows, empty }: { rows: React.ReactNode[][]; empty: string }) {
   if (!rows.length) return <p className="empty">{empty}</p>;
-  return <div className="table">{rows.map((row, index) => <div key={index}>{row.map((cell, cellIndex) => <span key={cellIndex}>{cell}</span>)}</div>)}</div>;
+  return <div className="table">{rows.map((row, index) => <div key={index} style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}>{row.map((cell, cellIndex) => <span key={cellIndex}>{cell}</span>)}</div>)}</div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

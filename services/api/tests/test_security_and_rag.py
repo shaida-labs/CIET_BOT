@@ -79,3 +79,21 @@ async def test_upload_validation_accepts_text_file():
     )
     checksum = await validate_upload(file, b"official notice", EmptyScalarSession(), settings)
     assert len(checksum) == 64
+
+
+@pytest.mark.anyio
+async def test_bootstrap_disabled_in_production():
+    from app.api.routes.auth import bootstrap
+    from app.schemas import LoginIn
+    from types import SimpleNamespace
+
+    settings = Settings(environment="production", jwt_secret="a-very-long-secret-key-that-is-secure-and-over-20-chars")
+    with pytest.raises(HTTPException) as exc:
+        await bootstrap(
+            LoginIn(username="admin@ciet.edu", password="password123"),
+            SimpleNamespace(client=SimpleNamespace(host="test")),
+            EmptyScalarSession(),
+            settings,
+        )
+    assert exc.value.status_code == 403
+    assert "Bootstrap disabled in production" in exc.value.detail

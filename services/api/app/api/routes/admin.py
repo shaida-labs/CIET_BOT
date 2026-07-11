@@ -1,5 +1,6 @@
 import base64
 import uuid
+import asyncio
 from collections import Counter
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -268,6 +269,7 @@ async def reprocess_document(
     document_id: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
     user: AdminUser = Depends(current_user),
 ) -> IngestionJob:
     document = await session.get(Document, document_id)
@@ -277,12 +279,17 @@ async def reprocess_document(
     if not job:
         job = IngestionJob(document_id=document_id)
         session.add(job)
+    try:
+        content = await StorageService(settings).get(document.file_path)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Source file could not be read from storage: {exc}")
     job.status = "queued"
     job.progress = 0
     job.error_message = None
     document.status = "queued"
     await write_audit(session, action="reprocess", entity_type="document", entity_id=document_id, user=user, request=request)
     await session.commit()
+    process_document.delay(document.id, base64.b64encode(content).decode("ascii"), document.title)
     return job
 
 
@@ -297,7 +304,7 @@ async def delete_document(
     document = await session.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    PineconeService(settings).delete_document(document_id)
+    await asyncio.to_thread(PineconeService(settings).delete_document, document_id)
     await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
     await session.delete(document)
     await write_audit(session, action="delete", entity_type="document", entity_id=document_id, user=user, request=request)
@@ -352,20 +359,25 @@ async def analytics(session: AsyncSession = Depends(get_session)) -> AnalyticsSu
 @router.get("/conversations")
 async def conversation_logs(session: AsyncSession = Depends(get_session)) -> list[dict]:
     messages = (
-        await session.scalars(select(ConversationMessage).order_by(ConversationMessage.created_at.desc()).limit(100))
+        await session.scalars(select(ConversationMessage).order_by(ConversationMessage.created_at.desc()).limit(200))
     ).all()
-    return [
-        {
-            "id": message.id,
-            "conversation_id": message.conversation_id,
-            "role": message.role,
-            "content": message.content,
-            "confidence": message.confidence,
-            "route": message.route,
-            "created_at": message.created_at,
-        }
-        for message in messages
-    ]
+    groups = {}
+    for msg in messages:
+        groups.setdefault(msg.conversation_id, []).append(msg)
+    sorted_groups = sorted(groups.values(), key=lambda g: g[0].created_at, reverse=True)
+    flattened = []
+    for g in sorted_groups:
+        for msg in sorted(g, key=lambda m: m.created_at):
+            flattened.append({
+                "id": msg.id,
+                "conversation_id": msg.conversation_id,
+                "role": msg.role,
+                "content": msg.content,
+                "confidence": msg.confidence,
+                "route": msg.route,
+                "created_at": msg.created_at,
+            })
+    return flattened
 
 
 @router.get("/audit-logs", response_model=list[AuditLogOut])

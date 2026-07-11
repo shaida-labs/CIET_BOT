@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.models import FAQ, Metric
 from app.schemas import Citation, RetrievalResult
-from app.services.guardrails import SAFE_STAT_RESPONSE, is_sensitive_stat_question
+from app.services.guardrails import SAFE_STAT_RESPONSES, is_sensitive_stat_question
 from app.services.llm import LLMService
 from app.services.pinecone_service import PineconeService, citations_from_hits
 
@@ -26,7 +26,7 @@ class RetrievalService:
         start = perf_counter()
         result = await self._faq(session, query, language)
         if not result:
-            result = await self._metric(session, query)
+            result = await self._metric(session, query, language)
         if not result:
             result = await self._rag(session, query, language)
         if not result:
@@ -61,12 +61,12 @@ class RetrievalService:
             citations=[Citation(title=best.source, section="FAQ Database")],
         )
 
-    async def _metric(self, session: AsyncSession, query: str) -> RetrievalResult | None:
+    async def _metric(self, session: AsyncSession, query: str, language: str) -> RetrievalResult | None:
         metrics = (await session.scalars(select(Metric))).all()
         if not metrics:
             if is_sensitive_stat_question(query):
                 return RetrievalResult(
-                    answer=SAFE_STAT_RESPONSE,
+                    answer=SAFE_STAT_RESPONSES.get(language, SAFE_STAT_RESPONSES["en"]),
                     route="metric",
                     confidence="medium",
                     score=0.6,
@@ -78,7 +78,7 @@ class RetrievalService:
         if score < 0.5:
             if is_sensitive_stat_question(query):
                 return RetrievalResult(
-                    answer=SAFE_STAT_RESPONSE,
+                    answer=SAFE_STAT_RESPONSES.get(language, SAFE_STAT_RESPONSES["en"]),
                     route="metric",
                     confidence="medium",
                     score=0.6,

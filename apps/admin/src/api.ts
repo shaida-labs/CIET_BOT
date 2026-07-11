@@ -57,4 +57,8 @@ export const client = {
   },
   refreshKnowledge: async () => api<{ status: string; chunks: string }>("/api/v1/admin/knowledge/refresh", { method: "POST" }),
   conversations: async () => api<Record<string, unknown>[]>("/api/v1/admin/conversations"),
+  deleteDocument: async (id: string) => api<void>(`/api/v1/admin/documents/${id}`, { method: "DELETE" }),
+  reprocessDocument: async (id: string) => api<{ id: string; status: string }>(`/api/v1/admin/documents/${id}/reprocess`, { method: "POST" }),
+  deleteFaq: async (id: string) => api<void>(`/api/v1/admin/faqs/${id}`, { method: "DELETE" }),
+  deleteMetric: async (id: string) => api<void>(`/api/v1/admin/metrics/${id}`, { method: "DELETE" }),
 };

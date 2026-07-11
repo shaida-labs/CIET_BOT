@@ -73,23 +73,23 @@ async def whatsapp_webhook(
                     )
                     delivery = await send_whatsapp_message(settings, sender, response.message.content)
                     session.add(delivery)
-            for status in value.get("statuses", []):
-                provider_id = status.get("id")
-                if provider_id:
-                    existing = await session.scalar(
-                        select(WhatsAppDelivery).where(WhatsAppDelivery.provider_message_id == provider_id)
-                    )
-                    if existing:
-                        existing.status = status.get("status", existing.status)
-                    else:
-                        session.add(
-                            WhatsAppDelivery(
-                                provider_message_id=provider_id,
-                                recipient=status.get("recipient_id", "unknown"),
-                                status=status.get("status", "unknown"),
-                                payload=status,
-                            )
+                for status in value.get("statuses", []):
+                    provider_id = status.get("id")
+                    if provider_id:
+                        existing = await session.scalar(
+                            select(WhatsAppDelivery).where(WhatsAppDelivery.provider_message_id == provider_id)
                         )
+                        if existing:
+                            existing.status = status.get("status", existing.status)
+                        else:
+                            session.add(
+                                WhatsAppDelivery(
+                                    provider_message_id=provider_id,
+                                    recipient=status.get("recipient_id", "unknown"),
+                                    status=status.get("status", "unknown"),
+                                    payload=status,
+                                )
+                            )
         await session.commit()
     return {"status": "ok"}
 

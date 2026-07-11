@@ -14,4 +14,5 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_retry_delay=20,
     task_routes={"app.workers.tasks.*": {"queue": "ingestion"}},
+    imports=["app.workers.tasks"],
 )

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_session
 from app.models import AdminUser
@@ -30,7 +31,10 @@ async def bootstrap(
     payload: LoginIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> TokenOut:
+    if settings.environment == "production":
+        raise HTTPException(status_code=403, detail="Bootstrap disabled in production")
     existing = await session.scalar(select(AdminUser))
     if existing:
         raise HTTPException(status_code=409, detail="Admin already exists")

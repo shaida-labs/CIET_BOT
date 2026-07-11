@@ -14,5 +14,8 @@
     "test": "npm run test --workspaces --if-present",
     "api:dev": "cd services/api && uvicorn app.main:app --reload --port 8000",
     "api:test": "cd services/api && pytest"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.3.0"
   }
 }
