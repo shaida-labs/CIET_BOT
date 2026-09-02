@@ -1,4 +1,3 @@
-import base64
 import uuid
 import asyncio
 from collections import Counter
@@ -21,8 +20,10 @@ from app.models import (
     DocumentChunk,
     FAQ,
     Feedback,
+    HandoffTicket,
     IngestionJob,
     Metric,
+    now,
 )
 from app.schemas import (
     AnalyticsSummary,
@@ -32,6 +33,9 @@ from app.schemas import (
     DomainOut,
     FAQIn,
     FAQOut,
+    FeedbackOut,
+    HandoffTicketOut,
+    HandoffTicketUpdateIn,
     JobOut,
     MetricIn,
     MetricOut,
@@ -40,22 +44,35 @@ from app.schemas import (
     PaginatedMetrics,
 )
 from app.services.audit import write_audit
-from app.services.pinecone_service import PineconeService
+from app.services.cache import invalidate_knowledge_cache
+from app.services.pinecone_service import PineconeService, PineconeUnavailableError
 from app.services.storage import StorageService
-from app.services.upload_security import validate_upload
+from app.services.upload_security import read_upload_limited, validate_filename, validate_upload
 from app.workers.tasks import process_document
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_roles(Role.content_admin))])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(current_user)])
+
+# CIET has intentionally small, function-specific administrative roles. Super admins
+# are implicitly accepted by require_roles. Keep these dependencies explicit so a
+# general content editor cannot change verified placement metrics or operational
+# security settings.
+faq_admin = require_roles(Role.content_admin, Role.admissions_admin)
+metric_admin = require_roles(Role.placement_admin)
+document_admin = require_roles(Role.content_admin)
+super_admin = require_roles(Role.super_admin)
 
 
-@router.get("/faqs", response_model=list[FAQOut])
-async def list_faqs(session: AsyncSession = Depends(get_session)) -> list[FAQ]:
-    return list((await session.scalars(select(FAQ).order_by(FAQ.updated_at.desc()))).all())
+@router.get("/faqs", response_model=list[FAQOut], dependencies=[Depends(faq_admin)])
+async def list_faqs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: AsyncSession = Depends(get_session),
+) -> list[FAQ]:
+    return list((await session.scalars(select(FAQ).order_by(FAQ.updated_at.desc()).limit(limit))).all())
 
 
-@router.get("/faqs/page", response_model=PaginatedFAQs)
+@router.get("/faqs/page", response_model=PaginatedFAQs, dependencies=[Depends(faq_admin)])
 async def page_faqs(
-    q: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -78,13 +95,14 @@ async def create_faq(
     payload: FAQIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(faq_admin),
 ) -> FAQ:
     faq = FAQ(**payload.model_dump())
     session.add(faq)
     await session.flush()
     await write_audit(session, action="create", entity_type="faq", entity_id=faq.id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
     await session.refresh(faq)
     return faq
 
@@ -95,7 +113,7 @@ async def update_faq(
     payload: FAQIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(faq_admin),
 ) -> FAQ:
     faq = await session.get(FAQ, faq_id)
     if not faq:
@@ -104,6 +122,7 @@ async def update_faq(
         setattr(faq, key, value)
     await write_audit(session, action="update", entity_type="faq", entity_id=faq.id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
     await session.refresh(faq)
     return faq
 
@@ -113,7 +132,7 @@ async def delete_faq(
     faq_id: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(faq_admin),
 ) -> None:
     faq = await session.get(FAQ, faq_id)
     if not faq:
@@ -121,16 +140,20 @@ async def delete_faq(
     await session.delete(faq)
     await write_audit(session, action="delete", entity_type="faq", entity_id=faq_id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
 
 
-@router.get("/metrics", response_model=list[MetricOut])
-async def list_metrics(session: AsyncSession = Depends(get_session)) -> list[Metric]:
-    return list((await session.scalars(select(Metric).order_by(Metric.updated_at.desc()))).all())
+@router.get("/metrics", response_model=list[MetricOut], dependencies=[Depends(metric_admin)])
+async def list_metrics(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: AsyncSession = Depends(get_session),
+) -> list[Metric]:
+    return list((await session.scalars(select(Metric).order_by(Metric.updated_at.desc()).limit(limit))).all())
 
 
-@router.get("/metrics/page", response_model=PaginatedMetrics)
+@router.get("/metrics/page", response_model=PaginatedMetrics, dependencies=[Depends(metric_admin)])
 async def page_metrics(
-    q: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -153,13 +176,14 @@ async def create_metric(
     payload: MetricIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(metric_admin),
 ) -> Metric:
     metric = Metric(**payload.model_dump())
     session.add(metric)
     await session.flush()
     await write_audit(session, action="create", entity_type="metric", entity_id=metric.id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
     await session.refresh(metric)
     return metric
 
@@ -170,7 +194,7 @@ async def update_metric(
     payload: MetricIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(metric_admin),
 ) -> Metric:
     metric = await session.get(Metric, metric_id)
     if not metric:
@@ -179,6 +203,7 @@ async def update_metric(
         setattr(metric, key, value)
     await write_audit(session, action="update", entity_type="metric", entity_id=metric.id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
     await session.refresh(metric)
     return metric
 
@@ -188,7 +213,7 @@ async def delete_metric(
     metric_id: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(metric_admin),
 ) -> None:
     metric = await session.get(Metric, metric_id)
     if not metric:
@@ -196,16 +221,22 @@ async def delete_metric(
     await session.delete(metric)
     await write_audit(session, action="delete", entity_type="metric", entity_id=metric_id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(get_settings())
 
 
-@router.get("/documents", response_model=list[DocumentOut])
-async def list_documents(session: AsyncSession = Depends(get_session)) -> list[Document]:
-    return list((await session.scalars(select(Document).order_by(Document.uploaded_at.desc()))).all())
+@router.get("/documents", response_model=list[DocumentOut], dependencies=[Depends(document_admin)])
+async def list_documents(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: AsyncSession = Depends(get_session),
+) -> list[Document]:
+    return list(
+        (await session.scalars(select(Document).order_by(Document.uploaded_at.desc()).limit(limit))).all()
+    )
 
 
-@router.get("/documents/page", response_model=PaginatedDocuments)
+@router.get("/documents/page", response_model=PaginatedDocuments, dependencies=[Depends(document_admin)])
 async def page_documents(
-    q: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
@@ -229,14 +260,15 @@ async def upload_document(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(document_admin),
 ) -> Document:
-    content = await file.read()
+    filename = validate_filename(file.filename)
+    content = await read_upload_limited(file, settings.max_upload_bytes)
     checksum = await validate_upload(file, content, session, settings)
-    key = f"documents/{uuid.uuid4()}-{file.filename}"
+    key = f"documents/{uuid.uuid4()}-{filename}"
     path = await StorageService(settings).put(key, content, file.content_type or "application/octet-stream")
     document = Document(
-        title=file.filename,
+        title=filename,
         source="Admin upload",
         file_path=path,
         mime_type=file.content_type or "application/octet-stream",
@@ -249,14 +281,27 @@ async def upload_document(
     await session.flush()
     job = IngestionJob(document_id=document.id, status="queued", progress=0)
     session.add(job)
-    await write_audit(session, action="upload", entity_type="document", entity_id=document.id, user=user, request=request, metadata={"filename": file.filename})
+    await write_audit(
+        session,
+        action="upload",
+        entity_type="document",
+        entity_id=document.id,
+        user=user,
+        request=request,
+        metadata={"filename": filename},
+    )
     await session.commit()
-    process_document.delay(document.id, base64.b64encode(content).decode("ascii"), file.filename)
+    await invalidate_knowledge_cache(settings)
+    process_document.delay(document.id)
     await session.refresh(document)
     return document
 
 
-@router.get("/documents/{document_id}/job", response_model=JobOut)
+@router.get(
+    "/documents/{document_id}/job",
+    response_model=JobOut,
+    dependencies=[Depends(document_admin)],
+)
 async def document_job(document_id: str, session: AsyncSession = Depends(get_session)) -> IngestionJob:
     job = await session.scalar(select(IngestionJob).where(IngestionJob.document_id == document_id))
     if not job:
@@ -270,7 +315,7 @@ async def reprocess_document(
     request: Request,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(document_admin),
 ) -> IngestionJob:
     document = await session.get(Document, document_id)
     if not document:
@@ -279,17 +324,14 @@ async def reprocess_document(
     if not job:
         job = IngestionJob(document_id=document_id)
         session.add(job)
-    try:
-        content = await StorageService(settings).get(document.file_path)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"Source file could not be read from storage: {exc}")
     job.status = "queued"
     job.progress = 0
     job.error_message = None
     document.status = "queued"
     await write_audit(session, action="reprocess", entity_type="document", entity_id=document_id, user=user, request=request)
     await session.commit()
-    process_document.delay(document.id, base64.b64encode(content).decode("ascii"), document.title)
+    await invalidate_knowledge_cache(settings)
+    process_document.delay(document.id)
     return job
 
 
@@ -299,22 +341,65 @@ async def delete_document(
     request: Request,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(document_admin),
 ) -> None:
     document = await session.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    await asyncio.to_thread(PineconeService(settings).delete_document, document_id)
+    try:
+        pinecone = PineconeService(settings)
+        await pinecone.ensure_index_compatible()
+        await asyncio.to_thread(pinecone.delete_document, document_id)
+    except PineconeUnavailableError:
+        # A document that never reached indexed state has no acknowledged
+        # vector to remove, so it must remain removable after an ingestion
+        # outage. Indexed documents fail explicitly to avoid orphaning data.
+        if document.status == "indexed":
+            raise HTTPException(
+                status_code=503,
+                detail="Document vectors could not be deleted because Pinecone is unavailable",
+            ) from None
+    await StorageService(settings).delete(document.file_path)
     await session.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
     await session.delete(document)
     await write_audit(session, action="delete", entity_type="document", entity_id=document_id, user=user, request=request)
     await session.commit()
+    await invalidate_knowledge_cache(settings)
 
 
 @router.post("/knowledge/refresh", status_code=202)
-async def refresh_knowledge(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
-    count = await session.scalar(select(func.count(DocumentChunk.id)))
-    return {"status": "queued", "chunks": str(count or 0)}
+async def refresh_knowledge(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    user: AdminUser = Depends(document_admin),
+) -> dict[str, int | str]:
+    documents = (await session.scalars(select(Document))).all()
+    queued = 0
+    for document in documents:
+        job = await session.scalar(select(IngestionJob).where(IngestionJob.document_id == document.id))
+        if not job:
+            job = IngestionJob(document_id=document.id)
+            session.add(job)
+        job.status = "queued"
+        job.progress = 0
+        job.error_message = None
+        document.status = "queued"
+        document.error_message = None
+        process_document.delay(document.id)
+        queued += 1
+    await write_audit(
+        session,
+        action="refresh",
+        entity_type="knowledge_base",
+        entity_id=None,
+        user=user,
+        request=request,
+        metadata={"documents_queued": queued},
+    )
+    await session.commit()
+    await invalidate_knowledge_cache(settings)
+    return {"status": "queued", "documents": queued}
 
 
 @router.get("/analytics", response_model=AnalyticsSummary)
@@ -356,7 +441,7 @@ async def analytics(session: AsyncSession = Depends(get_session)) -> AnalyticsSu
     )
 
 
-@router.get("/conversations")
+@router.get("/conversations", dependencies=[Depends(super_admin)])
 async def conversation_logs(session: AsyncSession = Depends(get_session)) -> list[dict]:
     messages = (
         await session.scalars(select(ConversationMessage).order_by(ConversationMessage.created_at.desc()).limit(200))
@@ -380,7 +465,75 @@ async def conversation_logs(session: AsyncSession = Depends(get_session)) -> lis
     return flattened
 
 
-@router.get("/audit-logs", response_model=list[AuditLogOut])
+@router.get("/feedback", response_model=list[FeedbackOut], dependencies=[Depends(super_admin)])
+async def feedback_dashboard(session: AsyncSession = Depends(get_session)) -> list[FeedbackOut]:
+    rows = (
+        await session.execute(
+            select(Feedback, ConversationMessage)
+            .join(ConversationMessage, Feedback.message_id == ConversationMessage.id)
+            .order_by(Feedback.created_at.desc())
+            .limit(300)
+        )
+    ).all()
+    return [
+        FeedbackOut(
+            id=item.id,
+            message_id=item.message_id,
+            rating=item.rating,
+            comment=item.comment,
+            message_content=message.content,
+            conversation_id=message.conversation_id,
+            created_at=item.created_at,
+        )
+        for item, message in rows
+    ]
+
+
+@router.get("/handoff-tickets", response_model=list[HandoffTicketOut], dependencies=[Depends(super_admin)])
+async def handoff_tickets(session: AsyncSession = Depends(get_session)) -> list[HandoffTicket]:
+    return list(
+        (
+            await session.scalars(
+                select(HandoffTicket).order_by(HandoffTicket.created_at.desc()).limit(300)
+            )
+        ).all()
+    )
+
+
+@router.patch("/handoff-tickets/{ticket_id}", response_model=HandoffTicketOut)
+async def update_handoff_ticket(
+    ticket_id: str,
+    payload: HandoffTicketUpdateIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: AdminUser = Depends(super_admin),
+) -> HandoffTicket:
+    ticket = await session.get(HandoffTicket, ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Handoff ticket not found")
+    ticket.status = payload.status
+    ticket.internal_note = payload.internal_note
+    if payload.status in {"resolved", "closed"}:
+        ticket.resolved_by_id = user.id
+        ticket.resolved_at = now()
+    else:
+        ticket.resolved_by_id = None
+        ticket.resolved_at = None
+    await write_audit(
+        session,
+        action="update",
+        entity_type="handoff_ticket",
+        entity_id=ticket.id,
+        user=user,
+        request=request,
+        metadata={"status": ticket.status},
+    )
+    await session.commit()
+    await session.refresh(ticket)
+    return ticket
+
+
+@router.get("/audit-logs", response_model=list[AuditLogOut], dependencies=[Depends(super_admin)])
 async def audit_logs(session: AsyncSession = Depends(get_session)) -> list[AuditLogOut]:
     logs = (await session.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(200))).all()
     return [
@@ -398,7 +551,7 @@ async def audit_logs(session: AsyncSession = Depends(get_session)) -> list[Audit
     ]
 
 
-@router.get("/domains", response_model=list[DomainOut])
+@router.get("/domains", response_model=list[DomainOut], dependencies=[Depends(super_admin)])
 async def list_domains(session: AsyncSession = Depends(get_session)) -> list[AllowedDomain]:
     return list((await session.scalars(select(AllowedDomain).order_by(AllowedDomain.domain))).all())
 
@@ -408,7 +561,7 @@ async def create_domain(
     payload: DomainIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
-    user: AdminUser = Depends(current_user),
+    user: AdminUser = Depends(super_admin),
 ) -> AllowedDomain:
     domain = AllowedDomain(domain=payload.domain.lower().strip(), is_active=payload.is_active)
     session.add(domain)

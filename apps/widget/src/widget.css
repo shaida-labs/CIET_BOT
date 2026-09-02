@@ -2,26 +2,57 @@
   all: initial;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ciet-widget *, .ciet-widget *::before, .ciet-widget *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
 :host,
 :root {
   color-scheme: light;
-  --ciet-primary: #0B5D4D;
-  --ciet-primary-deep: #062F28;
+  --ciet-primary: #075e54;
+  --ciet-primary-deep: #043d36;
   --ciet-secondary: #E53935;
   --ciet-blue: #1565C0;
-  --ciet-green: #7CB342;
-  --ciet-bg: #F8FAF9;
+  --ciet-green: #22a06b;
+  --ciet-bg: #f4f8f7;
   --ciet-card: #FFFFFF;
   --ciet-ink: #1F2937;
   --ciet-muted: #6B7280;
   --ciet-line: #E5E7EB;
   --ciet-glass: rgba(255, 255, 255, 0.88);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: Inter, "Noto Sans Telugu", "Noto Sans Devanagari", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* A generic UI face can claim a missing Indic glyph and render its .notdef
+ * box instead of falling through. Make the chosen writing system explicit. */
+.ciet-widget[lang="te"] {
+  font-family: "Noto Sans Telugu", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.ciet-widget[lang="hi"] {
+  font-family: "Noto Sans Devanagari", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.ciet-message-row[lang="te"] {
+  font-family: "Noto Sans Telugu", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.ciet-message-row[lang="hi"] {
+  font-family: "Noto Sans Devanagari", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * { box-sizing: border-box; }
 button, textarea, select { font: inherit; }
 button { cursor: pointer; }
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 3px solid #1565c0;
+  outline-offset: 3px;
+}
 .integration-preview {
   min-height: 100vh;
   display: grid;
@@ -56,9 +87,9 @@ button { cursor: pointer; }
 body.ciet-preview-page .ciet-widget {
   bottom: 96px;
 }
-.ciet-widget--bottom-left { right: 24px; }
+.ciet-widget--bottom-left { left: 24px; right: auto; }
 .ciet-widget--bottom-right { right: 24px; }
-.ciet-launch-wrap { position: relative; display: flex; align-items: center; gap: 12px; }
+.ciet-launch-wrap { position: relative; display: flex; align-items: center; gap: 12px; animation: cietEnter 180ms ease-out; }
 .ciet-tooltip {
   position: absolute;
   left: 82px;
@@ -144,14 +175,16 @@ body.ciet-preview-page .ciet-widget {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid rgba(217, 224, 221, .92);
-  border-radius: 22px;
+  border: 1px solid rgba(208, 224, 218, .96);
+  border-radius: 26px;
   background:
-    linear-gradient(180deg, rgba(255,255,255,.98), rgba(248,250,249,.96)),
-    radial-gradient(circle at 22% 0%, rgba(124, 179, 66, .12), transparent 34%);
-  box-shadow: 0 28px 90px rgba(15, 23, 42, .18), 0 12px 32px rgba(11, 93, 77, .12), inset 0 1px 0 rgba(255,255,255,.9);
+    linear-gradient(180deg, rgba(255,255,255,.99), rgba(244,248,247,.98)),
+    radial-gradient(circle at 12% 0%, rgba(86, 198, 164, .17), transparent 38%);
+  box-shadow: 0 30px 86px rgba(15, 23, 42, .22), 0 10px 28px rgba(7, 94, 84, .15), inset 0 1px 0 rgba(255,255,255,.95);
   backdrop-filter: blur(24px);
+  animation: cietEnter 180ms ease-out;
 }
+@keyframes cietEnter { from { transform: translateY(12px) scale(.98); } to { transform: none; } }
 .ciet-panel--minimized { height: 78px; }
 .ciet-resizer {
   position: absolute;
@@ -166,20 +199,24 @@ body.ciet-preview-page .ciet-widget {
   background: rgba(255,255,255,.9);
   box-shadow: 0 10px 24px rgba(14, 44, 36, .12);
 }
-.ciet-widget--bottom-left .ciet-resizer { left: -12px; transform: scaleX(-1); }
+.ciet-widget--bottom-left .ciet-resizer { right: -12px; }
 .ciet-widget--bottom-right .ciet-resizer { left: -12px; transform: scaleX(-1); }
 .ciet-header {
-  min-height: 72px;
-  height: 72px;
+  min-height: 78px;
+  height: 78px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--ciet-line);
-  background: rgba(255,255,255,.72);
+  padding: 13px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.18);
+  color: #fff;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(180, 245, 216, .26), transparent 38%),
+    linear-gradient(120deg, #064a42, #087363 58%, #0a5e54);
 }
 .ciet-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ciet-identity > div { min-width: 0; }
 .ciet-avatar {
   display: grid;
   place-items: center;
@@ -202,10 +239,9 @@ body.ciet-preview-page .ciet-widget {
   display: grid;
   place-items: center;
   color: #fff;
-  background:
-    radial-gradient(circle at 32% 24%, rgba(255,255,255,.28), transparent 31%),
-    linear-gradient(145deg, var(--ciet-primary), var(--ciet-primary-deep));
-  box-shadow: 0 11px 26px rgba(11, 93, 77, .22), inset 0 1px 0 rgba(255,255,255,.24);
+  border: 1px solid rgba(255,255,255,.24);
+  background: rgba(255,255,255,.14);
+  box-shadow: 0 10px 24px rgba(0, 30, 25, .2), inset 0 1px 0 rgba(255,255,255,.26);
 }
 .ciet-bot-mark svg {
   width: 29px;
@@ -213,51 +249,81 @@ body.ciet-preview-page .ciet-widget {
   filter: drop-shadow(0 5px 9px rgba(2, 21, 17, .2));
 }
 .ciet-identity img { width: 44px; height: 44px; object-fit: contain; border-radius: 14px; }
-.ciet-identity strong { display: block; font-size: 15px; letter-spacing: 0; color: var(--ciet-ink); }
-.ciet-identity small { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--ciet-muted); font-size: 12px; }
-.ciet-identity i { width: 7px; height: 7px; border-radius: 999px; background: #2bc875; box-shadow: 0 0 0 4px rgba(43, 200, 117, .13); }
-.ciet-header-actions { display: flex; align-items: center; gap: 7px; }
-.ciet-header-actions button, .ciet-language {
+.ciet-identity strong { display: block; overflow: hidden; color: #fff; font-size: 15px; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+.ciet-identity small { display: flex; align-items: center; gap: 6px; overflow: hidden; margin-top: 4px; color: rgba(255,255,255,.78); font-size: 11px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.ciet-identity i { width: 7px; height: 7px; border-radius: 999px; background: #8ff0bb; box-shadow: 0 0 0 4px rgba(143, 240, 187, .14); }
+.ciet-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.ciet-header-actions > button, .ciet-language-trigger {
   height: 34px;
-  border: 1px solid var(--ciet-line);
+  border: 1px solid rgba(255,255,255,.18);
   border-radius: 11px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  color: #50645d;
-  background: rgba(255,255,255,.72);
+  color: #fff;
+  background: rgba(255,255,255,.12);
 }
-.ciet-header-actions button { width: 34px; }
-.ciet-language { padding: 0 9px; }
-.ciet-language select {
-  appearance: none;
+.ciet-header-actions > button { width: 34px; }
+.ciet-language { position: relative; }
+.ciet-language-trigger { padding: 0 9px; font-size: 12px; font-weight: 800; }
+.ciet-language-trigger > span { max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ciet-language-trigger svg:last-child { transition: transform 160ms ease; }
+.ciet-language-chevron--open { transform: rotate(180deg); }
+.ciet-language-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 4;
+  width: 156px;
+  padding: 6px;
+  border: 1px solid rgba(192, 215, 207, .9);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 36px rgba(14, 44, 36, .2);
+}
+.ciet-language-option {
+  width: 100%;
+  min-height: 38px;
   border: 0;
-  outline: 0;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  color: #25483d;
   background: transparent;
-  color: inherit;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
 }
+.ciet-language-option:hover, .ciet-language-option:focus-visible { color: #075e54; background: #edf8f3; }
+.ciet-language-option[aria-checked="true"] { color: #075e54; background: #e0f4e9; }
+.ciet-language-option[lang="te"] { font-family: "Noto Sans Telugu", Inter, sans-serif; }
+.ciet-language-option[lang="hi"] { font-family: "Noto Sans Devanagari", Inter, sans-serif; }
 .ciet-trust {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 7px;
-  padding: 9px 12px;
-  color: #477062;
-  background: rgba(248, 250, 249, .92);
-  font-size: 12px;
+  padding: 9px 17px;
+  color: #3d6658;
+  background: linear-gradient(90deg, #effaf4, #f8fcfa);
+  font-size: 11px;
   font-weight: 700;
 }
+.ciet-trust > svg { color: var(--ciet-green); }
+.ciet-trust > i { width: 3px; height: 3px; border-radius: 999px; background: #a2b6ae; }
+.ciet-trust-secondary { color: #7a9188; font-weight: 600; }
 .ciet-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 17px 8px;
+  padding: 22px 18px 10px;
   scrollbar-width: thin;
   scrollbar-color: rgba(66, 107, 95, .35) transparent;
 }
-.ciet-message-row { display: flex; gap: 9px; margin-bottom: 18px; }
+.ciet-message-row { display: flex; gap: 10px; margin-bottom: 19px; animation: cietMessageIn 180ms ease-out; }
+@keyframes cietMessageIn { from { transform: translateY(8px); } to { transform: none; } }
 .ciet-message-row--user { justify-content: flex-end; }
 .ciet-avatar {
   flex: 0 0 auto;
@@ -266,25 +332,26 @@ body.ciet-preview-page .ciet-widget {
   border-radius: 10px;
   margin-top: 4px;
 }
-.ciet-message-wrap { max-width: 75%; min-width: 0; }
+.ciet-message-wrap { max-width: 78%; min-width: 0; }
 .ciet-message {
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.58;
-  box-shadow: 0 5px 16px rgba(16, 44, 37, .05);
+  box-shadow: 0 7px 18px rgba(16, 44, 37, .06);
 }
 .ciet-message--assistant {
   color: var(--ciet-ink);
   background: var(--ciet-card);
   border: 1px solid var(--ciet-line);
-  border-radius: 7px 17px 17px 17px;
+  border-radius: 8px 18px 18px 18px;
 }
 .ciet-message--user {
   color: #fff;
-  background: linear-gradient(145deg, #0B5D4D, #06463a);
-  border-radius: 17px 7px 17px 17px;
+  background: linear-gradient(145deg, #087364, #07594e);
+  border-radius: 18px 8px 18px 18px;
 }
 .ciet-message-meta {
   display: flex;
@@ -305,7 +372,7 @@ body.ciet-preview-page .ciet-widget {
 .ciet-confidence--medium { color: #9a6829; background: #f8eddf; }
 .ciet-confidence--low { color: #9a3b36; background: #fae6e4; }
 .ciet-citations { display: grid; gap: 5px; margin-top: 8px; }
-.ciet-citations a {
+.ciet-citations a, .ciet-citation {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -366,20 +433,32 @@ body.ciet-preview-page .ciet-widget {
   background: #fae9e7;
   font-size: 12px;
 }
+.ciet-notice {
+  margin: 0 0 12px 36px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: #235c45;
+  background: #e5f4e8;
+  font-size: 12px;
+  font-weight: 700;
+}
 .ciet-starters {
-  padding: 0 17px 8px;
+  margin: 0 17px 9px;
+  padding: 12px;
+  border: 1px solid #dceae4;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #f0faf6, #fbfdfc);
 }
 .ciet-starters strong {
   display: block;
   margin-bottom: 8px;
-  color: #667973;
+  color: #496a5e;
   font-size: 11px;
 }
 .ciet-starters div, .ciet-quick-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 .ciet-starters button, .ciet-quick-actions button {
   white-space: nowrap;
@@ -398,12 +477,13 @@ body.ciet-preview-page .ciet-widget {
   transform: translateY(-1px);
 }
 .ciet-starters button { padding: 9px 11px; }
-.ciet-quick-actions { padding: 7px 17px 11px; }
+.ciet-quick-actions { padding: 7px 17px 12px; }
 .ciet-quick-actions button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 8px 10px;
+  min-height: 36px;
 }
 .ciet-composer {
   margin: 0 17px;
@@ -412,9 +492,9 @@ body.ciet-preview-page .ciet-widget {
   align-items: flex-end;
   gap: 10px;
   border: 1px solid rgba(11, 93, 77, .18);
-  border-radius: 20px;
+  border-radius: 18px;
   background: #fff;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, .07);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, .07), inset 0 1px 0 rgba(255,255,255,.9);
 }
 .ciet-composer:focus-within { border-color: rgba(23, 79, 67, .45); box-shadow: 0 0 0 4px rgba(23, 79, 67, .08); }
 .ciet-composer textarea {
@@ -447,9 +527,10 @@ body.ciet-preview-page .ciet-widget {
 @keyframes cietSpin { to { transform: rotate(360deg); } }
 .ciet-footer {
   min-height: 39px;
-  padding: 8px 17px 12px;
+  padding: 9px 17px 14px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
   color: #87948f;
   font-size: 10px;
@@ -473,6 +554,7 @@ body.ciet-preview-page .ciet-widget {
     left: auto;
     right: 16px;
   }
+  .ciet-widget--bottom-left { left: 16px; right: auto; }
   .ciet-launch-wrap { justify-content: flex-start; }
   .ciet-panel {
     position: fixed;
@@ -492,5 +574,7 @@ body.ciet-preview-page .ciet-widget {
   .ciet-resizer { display: none; }
   .ciet-message-wrap { max-width: 88%; }
   .ciet-header { padding-left: 16px; padding-right: 12px; }
+  .ciet-trust-secondary, .ciet-trust > i { display: none; }
+  .ciet-trust { justify-content: center; padding-inline: 12px; }
   .ciet-footer span { display: none; }
 }

@@ -1,0 +1,382 @@
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { AxePuppeteer } from "@axe-core/puppeteer";
+import puppeteer from "puppeteer";
+
+const WEB_URL = process.env.CIET_E2E_WEB_URL || "http://localhost:8080";
+const API_URL = process.env.CIET_E2E_API_URL || "http://localhost:8000";
+const EMAIL = process.env.CIET_E2E_ADMIN_EMAIL || "ciet-e2e@local.invalid";
+const PASSWORD = process.env.CIET_E2E_ADMIN_PASSWORD || "CIET-e2e-password-2026!";
+const evidenceDir = path.resolve("qa_evidence/screenshots/live");
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+async function waitFor(url) {
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return;
+    } catch { /* service is starting */ }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Timed out waiting for ${url}`);
+}
+
+async function clickText(page, text) {
+  const clicked = await page.evaluate((label) => {
+    const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.includes(label));
+    button?.click();
+    return Boolean(button);
+  }, text);
+  assert(clicked, `Button not found: ${text}`);
+}
+
+async function setInput(page, selector, value) {
+  await page.$eval(selector, (element, nextValue) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(element, nextValue);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
+async function adminApi(page, route, init = {}) {
+  return page.evaluate(async ({ apiUrl, route, init }) => {
+    const csrf = document.cookie.split("; ").find((item) => item.startsWith("ciet_csrf_token="))?.split("=")[1];
+    const response = await fetch(`${apiUrl}${route}`, {
+      ...init,
+      credentials: "include",
+      headers: {
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(init.method && !["GET", "HEAD"].includes(init.method) && csrf ? { "X-CSRF-Token": decodeURIComponent(csrf) } : {}),
+      },
+    });
+    const body = response.status === 204 ? null : await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, body };
+  }, { apiUrl: API_URL, route, init });
+}
+
+async function chatFromWidget(page, message, language = "en") {
+  return page.evaluate(async ({ apiUrl, message, language }) => {
+    const response = await fetch(`${apiUrl}/api/v1/chat`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", "X-CIET-Tenant": "ciet" },
+      body: JSON.stringify({ message, language, channel: "website", history: [] }),
+    });
+    return { status: response.status, body: await response.json() };
+  }, { apiUrl: API_URL, message, language });
+}
+
+async function poll(check, description, attempts = 60) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+}
+
+function assertNoSeriousAxeViolations(result, surface) {
+  const blocking = result.violations.filter((item) => ["serious", "critical"].includes(item.impact));
+  assert(
+    blocking.length === 0,
+    `${surface} has serious/critical axe violations: ${blocking.map((item) => `${item.id} (${item.nodes.map((node) => `${node.target.join(" > ")}: ${node.failureSummary}`).join(" | ")})`).join(", ")}`,
+  );
+  return result.violations.map((item) => ({
+    id: item.id,
+    impact: item.impact,
+    nodes: item.nodes.length,
+    targets: item.nodes.map((node) => node.target.join(" > ")),
+  }));
+}
+
+await mkdir(evidenceDir, { recursive: true });
+await Promise.all([waitFor(`${WEB_URL}/healthz`), waitFor(`${API_URL}/readyz`)]);
+
+const browser = await puppeteer.launch({
+  headless: true,
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+  args: ["--no-sandbox", "--disable-dev-shm-usage"],
+});
+
+let admin;
+let widget;
+let faqId;
+let documentId;
+let placementBackups = [];
+let ingestionMode = "not-run";
+try {
+  admin = await browser.newPage();
+  await admin.setViewport({ width: 1440, height: 1000 });
+  await admin.goto(`${WEB_URL}/admin/`, { waitUntil: "networkidle2" });
+  await setInput(admin, 'input[type="email"]', EMAIL);
+  await setInput(admin, 'input[type="password"]', PASSWORD);
+  await admin.click('button[type="submit"]');
+  await admin.waitForFunction(() => document.querySelector(".shell") || document.querySelector(".error"), { timeout: 10000 });
+  if (!(await admin.$(".shell"))) {
+    await clickText(admin, "Bootstrap first admin");
+    await admin.waitForSelector(".shell", { timeout: 10000 });
+  }
+  await admin.screenshot({ path: path.join(evidenceDir, "admin-1440.png"), fullPage: true });
+
+  const initialMetrics = await adminApi(admin, "/api/v1/admin/metrics");
+  assert(initialMetrics.ok, "Could not list live metrics");
+  placementBackups = initialMetrics.body.filter((metric) => metric.name.trim().toLowerCase() === "placement percentage");
+  for (const metric of placementBackups) {
+    const removed = await adminApi(admin, `/api/v1/admin/metrics/${metric.id}`, { method: "DELETE" });
+    assert(removed.ok, "Could not establish the no-placement-metric state");
+  }
+
+  widget = await browser.newPage();
+  await widget.setViewport({ width: 1440, height: 1000 });
+  await widget.goto(`${WEB_URL}/widget/embed-test.html`, { waitUntil: "networkidle2" });
+  await widget.waitForFunction(() => document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelector("button"));
+  const shadowMounted = await widget.evaluate(() => Boolean(document.querySelector("ciet-ai-assistant")?.shadowRoot));
+  assert(shadowMounted, "Production widget did not mount in Shadow DOM");
+
+  const missing = await chatFromWidget(widget, "What is the placement percentage?");
+  assert(missing.status === 200, `Placement fallback returned ${missing.status}`);
+  assert(missing.body.message.confidence === "low", "Missing placement metric did not fail closed");
+  assert(!missing.body.message.content.includes("0%"), "Missing placement metric returned 0%");
+
+  await clickText(admin, "Metrics");
+  await admin.waitForSelector('input[aria-label="Metric name"]');
+  await admin.type('input[aria-label="Metric name"]', "placement percentage");
+  await admin.type('input[aria-label="Verified metric value"]', "92%");
+  await admin.type('input[aria-label="Verified by"]', "Placement Office");
+  await admin.type('input[aria-label="Metric source"]', "Official Placement Report");
+  await clickText(admin, "Add Metric");
+
+  const createdMetric = await poll(async () => {
+    const response = await adminApi(admin, "/api/v1/admin/metrics");
+    return response.body?.find((metric) => metric.name === "placement percentage" && metric.value === "92%");
+  }, "created placement metric");
+  const verified = await chatFromWidget(widget, "What is the placement percentage?");
+  assert(verified.body.message.confidence === "verified", "Verified placement metric was not used");
+  assert(verified.body.message.content.includes("92%"), "Verified placement answer omitted 92%");
+  assert(verified.body.message.citations.some((item) => item.title === "Official Placement Report"), "Placement citation was missing");
+
+  const deletedMetric = await adminApi(admin, `/api/v1/admin/metrics/${createdMetric.id}`, { method: "DELETE" });
+  assert(deletedMetric.ok, "Could not delete the placement metric");
+  const deletedFallback = await chatFromWidget(widget, "What is the placement percentage?");
+  assert(deletedFallback.body.message.confidence === "low" && !deletedFallback.body.message.content.includes("0%"), "Deleted metric did not restore safe fallback");
+
+  await clickText(admin, "FAQs");
+  await admin.waitForSelector('input[aria-label="Verified FAQ question"]');
+  const faqQuestion = "What is the CIET live browser verification code?";
+  const faqAnswer = "The verified CIET live browser code is GREEN-LAUNCH.";
+  await setInput(admin, 'input[aria-label="Verified FAQ question"]', faqQuestion);
+  await setInput(admin, 'input[aria-label="Verified FAQ answer"]', faqAnswer);
+  await setInput(admin, 'input[aria-label="FAQ source"]', "CIET E2E Registrar Record");
+  await clickText(admin, "Add FAQ");
+  const createdFaq = await poll(async () => {
+    const response = await adminApi(admin, "/api/v1/admin/faqs");
+    return response.body?.find((faq) => faq.question === faqQuestion);
+  }, "created FAQ");
+  faqId = createdFaq.id;
+  const faqChat = await chatFromWidget(widget, faqQuestion);
+  assert(faqChat.body.route === "faq" && faqChat.body.message.content === faqAnswer, "Live FAQ retrieval failed");
+
+  await widget.evaluate(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const launcher = root?.querySelector(".ciet-launcher");
+    if (launcher instanceof HTMLElement) launcher.click();
+  });
+  await widget.waitForFunction(() => document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelector("textarea"));
+  await widget.evaluate((question) => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const textarea = root?.querySelector("textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Widget message field is missing");
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(textarea, question);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.closest("form")?.requestSubmit();
+  }, faqQuestion);
+  await widget.waitForFunction((answer) => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    return root?.textContent?.includes(answer);
+  }, { timeout: 30000 }, faqAnswer);
+  const widgetJourney = await widget.evaluate((answer) => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    return {
+      userMessage: [...(root?.querySelectorAll(".ciet-message--user") || [])].some((item) => item.textContent?.includes("verification code")),
+      assistantMessage: [...(root?.querySelectorAll(".ciet-message--assistant") || [])].some((item) => item.textContent?.includes(answer)),
+      citation: root?.querySelector(".ciet-citations")?.textContent?.includes("CIET E2E Registrar Record"),
+    };
+  }, faqAnswer);
+  assert(widgetJourney.userMessage && widgetJourney.assistantMessage && widgetJourney.citation, "Widget message or citation rendering failed");
+
+  const widgetAxe = assertNoSeriousAxeViolations(
+    await new AxePuppeteer(widget).analyze(),
+    "Widget",
+  );
+  const adminAxe = assertNoSeriousAxeViolations(
+    await new AxePuppeteer(admin).analyze(),
+    "Admin",
+  );
+
+  const accessibilityControls = await widget.evaluate(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const citation = root?.querySelector(".ciet-citations");
+    const feedback = [...(root?.querySelectorAll(".ciet-message-actions button") || [])]
+      .map((item) => item.getAttribute("aria-label"))
+      .filter(Boolean);
+    return { citation: Boolean(citation?.textContent?.trim()), feedback };
+  });
+  assert(accessibilityControls.citation, "Citation is not exposed as readable text");
+  assert(accessibilityControls.feedback.length >= 4, "Feedback/message controls do not have accessible names");
+
+  await widget.evaluate(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const close = root?.querySelector(".ciet-header-actions button:last-child");
+    if (close instanceof HTMLElement) close.click();
+  });
+  await widget.waitForFunction(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    return root?.querySelector(".ciet-launcher") && !root.querySelector(".ciet-panel");
+  });
+
+  await widget.evaluate(() => {
+    const launcher = document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelector(".ciet-launcher");
+    if (launcher instanceof HTMLElement) launcher.focus();
+  });
+  await widget.keyboard.press("Enter");
+  await widget.waitForFunction(() => document.querySelector("ciet-ai-assistant")?.shadowRoot?.activeElement?.matches("textarea"));
+  await widget.keyboard.press("Tab");
+  const tabReachedControl = await widget.evaluate(() => {
+    const active = document.querySelector("ciet-ai-assistant")?.shadowRoot?.activeElement;
+    return Boolean(active?.matches("button,select,textarea,a[href]"));
+  });
+  assert(tabReachedControl, "TAB did not move to a widget control");
+  await widget.keyboard.down("Shift");
+  await widget.keyboard.press("Tab");
+  await widget.keyboard.up("Shift");
+  await widget.keyboard.press("Escape");
+  await widget.waitForFunction(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    return root?.activeElement?.matches(".ciet-launcher") && !root.querySelector(".ciet-panel");
+  });
+
+  const personaQuestions = [
+    ["student", faqQuestion, "en"],
+    ["parent", "What is the admission process?", "en"],
+    ["prospective student", "What courses are available at CIET?", "en"],
+    ["faculty", "Where can faculty find official CIET information?", "en"],
+    ["website visitor", "How can I contact CIET?", "en"],
+  ];
+  for (const [persona, question, language] of personaQuestions) {
+    const response = await chatFromWidget(widget, question, language);
+    assert(response.status === 200 && response.body?.message?.content, `${persona} browser request failed`);
+  }
+
+  await clickText(admin, "Documents");
+  const fixture = path.resolve("qa_evidence/fixtures/CIET_QA_RAG.txt");
+  const existingDocs = await adminApi(admin, "/api/v1/admin/documents");
+  for (const document of existingDocs.body.filter((item) => item.title === "CIET_QA_RAG.txt")) {
+    await adminApi(admin, `/api/v1/admin/documents/${document.id}`, { method: "DELETE" });
+  }
+  const upload = await admin.$('input[type="file"]');
+  assert(upload, "Document upload input is missing");
+  await upload.uploadFile(fixture);
+  const processedDocument = await poll(async () => {
+    const response = await adminApi(admin, "/api/v1/admin/documents");
+    const document = response.body?.find((item) => item.title === "CIET_QA_RAG.txt");
+    return ["indexed", "failed"].includes(document?.status) ? document : null;
+  }, "document processing");
+  documentId = processedDocument.id;
+  const reprocess = await adminApi(admin, `/api/v1/admin/documents/${documentId}/reprocess`, { method: "POST" });
+  assert(reprocess.ok, "Document reprocess request failed");
+  if (processedDocument.status === "failed") {
+    assert(processedDocument.error_message, "Failed ingestion did not expose a safe admin error");
+    const failedJob = await poll(async () => {
+      const response = await adminApi(admin, `/api/v1/admin/documents/${documentId}/job`);
+      return response.body?.status === "failed" ? response.body : null;
+    }, "failed document reprocessing");
+    assert(failedJob.error_message, "Failed reprocessing did not retain an error");
+    ingestionMode = "pinecone-unavailable";
+  } else {
+    await poll(async () => {
+      const response = await adminApi(admin, `/api/v1/admin/documents/${documentId}/job`);
+      if (response.body?.status === "failed") throw new Error("Live document reprocessing failed");
+      return response.body?.status === "complete";
+    }, "document reprocessing");
+    ingestionMode = "pinecone-indexed";
+  }
+
+  await clickText(admin, "Logs");
+  const conversations = await adminApi(admin, "/api/v1/admin/conversations");
+  assert(
+    conversations.ok && conversations.body.some((message) => message.content.includes("placement percentage")),
+    "Live conversation logs omitted the placement journey",
+  );
+  await admin.waitForFunction(() => document.body.innerText.includes("Conversation Logs"));
+
+  for (const width of [375, 414, 768, 1024, 1440]) {
+    await widget.setViewport({ width, height: width < 700 ? 844 : 1000 });
+    await widget.evaluate(() => {
+      const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+      const launcher = root?.querySelector(".ciet-launcher");
+      if (launcher instanceof HTMLElement) launcher.click();
+    });
+    const geometry = await widget.evaluate(() => {
+      const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+      const panel = root?.querySelector(".ciet-panel")?.getBoundingClientRect();
+      const unnamed = [...(root?.querySelectorAll("button,input,select,textarea,a[href]") || [])].filter((element) => {
+        const label = element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent;
+        return !label?.trim();
+      }).length;
+      return { viewport: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, panel: panel ? { left: panel.left, right: panel.right } : null, unnamed };
+    });
+    assert(geometry.scroll <= geometry.viewport + 1, `Widget host overflow at ${width}px`);
+    assert(geometry.panel && geometry.panel.left >= -1 && geometry.panel.right <= width + 1, `Widget panel outside ${width}px viewport`);
+    assert(geometry.unnamed === 0, `Widget has unnamed controls at ${width}px`);
+    await widget.screenshot({ path: path.join(evidenceDir, `widget-${width}.png`), fullPage: true });
+  }
+
+  await widget.evaluate(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const select = root?.querySelector("select");
+    if (select instanceof HTMLSelectElement) {
+      select.value = "hi";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+  await widget.waitForFunction(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    return root?.querySelector("textarea")?.getAttribute("aria-label")?.length;
+  });
+
+  for (const width of [375, 414, 768, 1024, 1440]) {
+    await admin.setViewport({ width, height: width < 700 ? 896 : 1000 });
+    const overflow = await admin.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+    assert(!overflow, `Admin overflow at ${width}px`);
+    await admin.screenshot({ path: path.join(evidenceDir, `admin-${width}.png`), fullPage: true });
+  }
+
+  console.log(JSON.stringify({
+    result: "Live E2E passed",
+    coverage: "real API/PostgreSQL/Redis/Celery, five user perspectives, Shadow DOM message/citation/feedback, keyboard TAB/SHIFT+TAB/ENTER/ESC, focus return, placement lifecycle, FAQ CRUD, upload/reprocess failure-or-success, logs, five responsive viewports",
+    ingestionMode,
+    axe: { widget: widgetAxe, admin: adminAxe },
+  }));
+} finally {
+  if (admin && !admin.isClosed()) {
+    if (documentId) await adminApi(admin, `/api/v1/admin/documents/${documentId}`, { method: "DELETE" }).catch(() => undefined);
+    if (faqId) await adminApi(admin, `/api/v1/admin/faqs/${faqId}`, { method: "DELETE" }).catch(() => undefined);
+    const current = await adminApi(admin, "/api/v1/admin/metrics").catch(() => ({ body: [] }));
+    const currentMetrics = Array.isArray(current.body) ? current.body : [];
+    for (const metric of currentMetrics.filter((item) => item.name.trim().toLowerCase() === "placement percentage")) {
+      await adminApi(admin, `/api/v1/admin/metrics/${metric.id}`, { method: "DELETE" }).catch(() => undefined);
+    }
+    for (const backup of placementBackups) {
+      await adminApi(admin, "/api/v1/admin/metrics", {
+        method: "POST",
+        body: JSON.stringify({ name: backup.name, value: backup.value, unit: backup.unit, verified_by: backup.verified_by, source: backup.source, is_sensitive_stat: backup.is_sensitive_stat }),
+      }).catch(() => undefined);
+    }
+  }
+  await browser.close();
+}

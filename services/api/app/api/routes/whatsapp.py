@@ -1,24 +1,55 @@
 import hashlib
 import hmac
-import asyncio
-
-import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
 from app.models import WhatsAppDelivery
-from app.schemas import ChatRequest
-from app.api.routes.chat import chat
 from app.services.language import detect_language
+from app.workers.tasks import process_whatsapp_message
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
 
+def webhook_values(payload: object) -> list[dict]:
+    """Return well-formed Meta value objects and reject an invalid envelope."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Invalid WhatsApp payload")
+    entries = payload.get("entry", [])
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=422, detail="Invalid WhatsApp payload")
+    values: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get("changes", [])
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if isinstance(change, dict) and isinstance(change.get("value"), dict):
+                values.append(change["value"])
+    return values
+
+
+def inbound_claim_statement(message_id: str, sender: str, message_type: str):
+    return (
+        insert(WhatsAppDelivery)
+        .values(
+            provider_message_id=message_id,
+            recipient=sender,
+            status="queued",
+            payload={"direction": "inbound", "type": message_type},
+        )
+        .on_conflict_do_nothing(index_elements=["provider_message_id"])
+        .returning(WhatsAppDelivery.id)
+    )
+
+
 def verify_signature(body: bytes, signature: str | None, settings: Settings) -> None:
     if not settings.whatsapp_app_secret:
-        return
+        raise HTTPException(status_code=503, detail="WhatsApp integration is not configured")
     if not signature or not signature.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Missing WhatsApp signature")
     digest = hmac.new(settings.whatsapp_app_secret.encode(), body, hashlib.sha256).hexdigest()
@@ -46,84 +77,66 @@ async def whatsapp_webhook(
 ):
     body = await request.body()
     verify_signature(body, x_hub_signature_256, settings)
-    payload = await request.json()
-    entries = payload.get("entry", [])
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid WhatsApp payload") from exc
+    values = webhook_values(payload)
+    jobs: list[tuple[str, str, str, str]] = []
     async for session in get_session():
-        for entry in entries:
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                for message in value.get("messages", []):
-                    message_type = message.get("type", "text")
-                    text = message.get("text", {}).get("body")
-                    sender = message.get("from")
-                    if not sender:
-                        continue
-                    if message_type in {"document", "image"} and not text:
-                        text = (
-                            "A document or media message was received on WhatsApp. "
-                            "Please ask a text question, or upload official documents in the admin dashboard."
-                        )
-                    if not text:
-                        continue
-                    response = await chat(
-                        ChatRequest(message=text, channel="whatsapp", user_ref=sender, language=detect_language(text)),
-                        request,
-                        session,
-                        settings,
-                    )
-                    delivery = await send_whatsapp_message(settings, sender, response.message.content)
-                    session.add(delivery)
-                for status in value.get("statuses", []):
-                    provider_id = status.get("id")
-                    if provider_id:
-                        existing = await session.scalar(
-                            select(WhatsAppDelivery).where(WhatsAppDelivery.provider_message_id == provider_id)
-                        )
-                        if existing:
-                            existing.status = status.get("status", existing.status)
-                        else:
-                            session.add(
-                                WhatsAppDelivery(
-                                    provider_message_id=provider_id,
-                                    recipient=status.get("recipient_id", "unknown"),
-                                    status=status.get("status", "unknown"),
-                                    payload=status,
-                                )
-                            )
-        await session.commit()
-    return {"status": "ok"}
-
-
-async def send_whatsapp_message(settings: Settings, to: str, text: str) -> WhatsAppDelivery:
-    delivery = WhatsAppDelivery(recipient=to, status="skipped", payload={"body": text[:3900]})
-    if not settings.whatsapp_access_token or not settings.whatsapp_phone_number_id:
-        return delivery
-    url = f"https://graph.facebook.com/v20.0/{settings.whatsapp_phone_number_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"preview_url": False, "body": text[:3900]},
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        for attempt in range(1, 4):
-            delivery.attempts = attempt
-            try:
-                response = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {settings.whatsapp_access_token}"},
-                    json=payload,
+        for value in values:
+            messages = value.get("messages", [])
+            statuses = value.get("statuses", [])
+            if not isinstance(messages, list) or not isinstance(statuses, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                message_type = message.get("type", "text")
+                text_payload = message.get("text", {})
+                text = text_payload.get("body") if isinstance(text_payload, dict) else None
+                sender = message.get("from")
+                message_id = message.get("id")
+                if not sender or not message_id:
+                    continue
+                inbound_id = await session.scalar(
+                    inbound_claim_statement(message_id, sender, message_type)
                 )
-                response.raise_for_status()
-                data = response.json()
-                provider_id = (data.get("messages") or [{}])[0].get("id")
-                delivery.provider_message_id = provider_id
-                delivery.status = "sent"
-                delivery.payload = data
-                return delivery
-            except httpx.HTTPError as exc:
-                delivery.status = "failed"
-                delivery.error_message = str(exc)
-                if attempt < 3:
-                    await asyncio.sleep(0.5 * attempt)
-    return delivery
+                if not inbound_id:
+                    continue
+                if message_type in {"document", "image"} and not text:
+                    text = (
+                        "A document or media message was received on WhatsApp. "
+                        "Please ask a text question, or upload official documents in the admin dashboard."
+                    )
+                if not text:
+                    await session.execute(
+                        update(WhatsAppDelivery)
+                        .where(WhatsAppDelivery.id == inbound_id)
+                        .values(status="ignored")
+                    )
+                    continue
+                jobs.append((str(inbound_id), sender, text, detect_language(text)))
+            for status in statuses:
+                if not isinstance(status, dict):
+                    continue
+                provider_id = status.get("id")
+                if provider_id:
+                    existing = await session.scalar(
+                        select(WhatsAppDelivery).where(WhatsAppDelivery.provider_message_id == provider_id)
+                    )
+                    if existing:
+                        existing.status = status.get("status", existing.status)
+                    else:
+                        session.add(
+                            WhatsAppDelivery(
+                                provider_message_id=provider_id,
+                                recipient=status.get("recipient_id", "unknown"),
+                                status=status.get("status", "unknown"),
+                                payload=status,
+                            )
+                        )
+        await session.commit()
+    for inbound_id, sender, text, language in jobs:
+        process_whatsapp_message.delay(inbound_id, sender, text, language)
+    return {"status": "ok"}

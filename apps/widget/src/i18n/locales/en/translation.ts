@@ -71,6 +71,7 @@ const translation = {
     },
   },
   chat: {
+    history: "Conversation history",
     placeholder: "Ask about CIET...",
     messageAria: "Message CIET AI",
     send: "Send message",
@@ -78,9 +79,18 @@ const translation = {
   },
   errors: {
     connection: "I could not reach CIET AI. Please check your connection and try again.",
-    feedback: "Feedback was saved locally and will be retried later.",
+    timeout: "CIET AI took too long to respond. Please try again.",
+    unauthorized: "Your chat session has expired. Start a new conversation and try again.",
+    forbidden: "This conversation is not available in this browser session.",
+    notFound: "The requested CIET AI resource was not found.",
+    conflict: "This request conflicts with the current chat state. Please try again.",
+    invalidRequest: "Please check your message and try again.",
+    rateLimit: "CIET AI is busy right now. Please try again shortly.",
+    server: "CIET AI is temporarily unavailable. Please try again shortly.",
+    feedback: "Feedback could not be saved. Please try again.",
     previewMount: "CIET AI preview failed to mount. Open the browser console for details.",
   },
+  notices: { feedbackSaved: "Thank you. Your feedback was saved." },
   messageActions: {
     copy: "Copy answer",
     copied: "Answer copied",

@@ -1,6 +1,7 @@
 import csv
 import io
 from pathlib import Path
+import re
 
 import docx
 import openpyxl
@@ -31,12 +32,60 @@ def extract_text(filename: str, content: bytes) -> str:
 
 
 def chunk_text(text: str, size: int = 1200, overlap: int = 180) -> list[str]:
-    normalized = " ".join(text.split())
-    if not normalized:
+    """Create bounded, overlapping chunks without cutting through words.
+
+    Sentence and paragraph boundaries are preferred. A single unusually long
+    token is kept intact rather than silently corrupting searchable content.
+    """
+    normalized = re.sub(r"[ \t]+", " ", text.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if not normalized or size <= 0:
         return []
+
+    overlap = max(0, min(overlap, size - 1))
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[.!?])\s+|\n+", normalized)
+        if segment.strip()
+    ]
     chunks: list[str] = []
-    start = 0
-    while start < len(normalized):
-        chunks.append(normalized[start : start + size])
-        start += max(1, size - overlap)
+
+    current: list[str] = []
+    current_length = 0
+
+    def flush() -> None:
+        nonlocal current, current_length
+        if not current:
+            return
+        chunks.append(" ".join(current))
+        carried: list[str] = []
+        carried_length = 0
+        for word in reversed(current):
+            added = len(word) + (1 if carried else 0)
+            if carried and carried_length + added > overlap:
+                break
+            if not carried and len(word) > overlap:
+                break
+            carried.insert(0, word)
+            carried_length += added
+        current = carried
+        current_length = len(" ".join(current))
+
+    for segment in segments:
+        words = segment.split()
+        for word in words:
+            added = len(word) + (1 if current else 0)
+            if current and current_length + added > size:
+                flush()
+                # Avoid an overlap-only chunk when the next token does not fit.
+                if current and len(" ".join([*current, word])) > size:
+                    current = []
+                    current_length = 0
+            current.append(word)
+            current_length += len(word) + (1 if len(current) > 1 else 0)
+        # Prefer ending a nearly-full chunk at the source sentence boundary.
+        if current_length >= max(1, size - overlap):
+            flush()
+
+    if current and (not chunks or " ".join(current) != chunks[-1]):
+        chunks.append(" ".join(current))
     return chunks

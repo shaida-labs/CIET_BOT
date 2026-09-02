@@ -1,0 +1,65 @@
+{
+  "responses": {
+    "health": {
+      "status": 200,
+      "headers": {
+        "content-length": "15",
+        "content-type": "application/json",
+        "date": "Tue, 21 Jul 2026 08:10:03 GMT",
+        "server": "uvicorn"
+      }
+    },
+    "docs": {
+      "status": 200,
+      "headers": {
+        "content-length": "1020",
+        "content-type": "text/html; charset=utf-8",
+        "date": "Tue, 21 Jul 2026 08:10:04 GMT",
+        "server": "uvicorn"
+      }
+    },
+    "metrics": {
+      "status": 200,
+      "headers": {
+        "content-length": "33438",
+        "content-type": "text/plain; version=1.0.0; charset=utf-8",
+        "date": "Tue, 21 Jul 2026 08:10:08 GMT",
+        "server": "uvicorn"
+      }
+    },
+    "widget": {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+        "content-length": "907",
+        "content-type": "text/html",
+        "date": "Tue, 21 Jul 2026 08:10:10 GMT",
+        "etag": "W/\"38b-UB/LfEYHo5cfRmaUQv65oe0rGGE\"",
+        "keep-alive": "timeout=5",
+        "vary": "Origin, Sec-Fetch-Dest"
+      }
+    },
+    "admin": {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+        "content-length": "555",
+        "content-type": "text/html",
+        "date": "Tue, 21 Jul 2026 08:10:11 GMT",
+        "etag": "W/\"22b-DL0VLsl6um/hblbY1Sm3+C7uUoc\"",
+        "keep-alive": "timeout=5",
+        "vary": "Origin, Sec-Fetch-Dest"
+      }
+    }
+  },
+  "maliciousOriginCors": {
+    "origin": "http://evil.test",
+    "fetchResult": {
+      "readable": false,
+      "error": "TypeError: Failed to fetch"
+    },
+    "apiResponses": []
+  }
+}

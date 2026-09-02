@@ -1,0 +1,25 @@
+{
+  "responses": [
+    {
+      "method": "OPTIONS",
+      "status": 200,
+      "body": ""
+    },
+    {
+      "method": "OPTIONS",
+      "status": 200,
+      "body": ""
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "body": "{\"total_queries\":61,\"failed_queries\":50,\"avg_response_ms\":15,\"website_usage\":61,\"whatsapp_usage\":0,\"user_satisfaction\":1.0,\"popular_questions\":[{\"query\":\"What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 7: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 10: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 9: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 3: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 4: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 6: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 5: What courses are available?\",\"count\":3}],\"document_usage\":[],\"daily_usage\":[],\"monthly_usage\":[],\"failed_questions\":[{\"query\":\"What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 7: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 10: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 9: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 3: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 4: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 6: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 5: What courses are available?\",\"count\":3}],\"channel_analytics\":[{\"channel\":\"website\",\"count\":61},{\"channel\":\"whatsapp\",\"count\":0}],\"confidence_trends\":[{\"bucket\":\"recent\",\"average\":0.117}],\"source_usage\":[]}"
+    },
+    {
+      "method": "GET",
+      "status": 200,
+      "body": "{\"total_queries\":61,\"failed_queries\":50,\"avg_response_ms\":15,\"website_usage\":61,\"whatsapp_usage\":0,\"user_satisfaction\":1.0,\"popular_questions\":[{\"query\":\"What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 7: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 10: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 9: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 3: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 4: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 6: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 5: What courses are available?\",\"count\":3}],\"document_usage\":[],\"daily_usage\":[],\"monthly_usage\":[],\"failed_questions\":[{\"query\":\"What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 7: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 10: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 9: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 3: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 4: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 6: What courses are available?\",\"count\":3},{\"query\":\"Concurrent browser test 5: What courses are available?\",\"count\":3}],\"channel_analytics\":[{\"channel\":\"website\",\"count\":61},{\"channel\":\"whatsapp\",\"count\":0}],\"confidence_trends\":[{\"bucket\":\"recent\",\"average\":0.117}],\"source_usage\":[]}"
+    }
+  ],
+  "visibleText": "CIET\nChalapathi\nInstitute of Engineering & Technology\nAUTONOMOUS\nCIET AI\nAdmin Console\nDashboard\nDocuments\nFAQs\nMetrics\nLogs\nFeedback\nLogout\nDashboard\n\nProduction controls for the shared website and WhatsApp assistant.\n\nTotal Queries\n61\nFailed Queries\n50\nAvg Response\n15ms\nSatisfaction\n100%\nChannel Usage\nWebsite\n61\nWhatsApp\n0\nPopular Questions\nWhat courses are available?\n3\nConcurrent browser test 7: What courses are available?\n3\nConcurrent browser test 10: What courses are available?\n3\nConcurrent browser test 9: What courses are available?\n3\nConcurrent browser test 3: What courses are available?\n3\nConcurrent browser test 4: What courses are available?\n3\nConcurrent browser test 6: What courses are available?\n3\nConcurrent browser test 5: What courses are available?\n3"
+}

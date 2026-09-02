@@ -11,6 +11,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  language?: Language;
   created_at: string;
   confidence?: "verified" | "high" | "medium" | "low";
   citations?: Citation[];

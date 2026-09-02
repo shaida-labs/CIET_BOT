@@ -1,4 +1,3 @@
-import { AnimatePresence, LazyMotion, domAnimation, m } from "framer-motion";
 import {
   AiRobot,
   Admission,
@@ -29,7 +28,7 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
-import { sendFeedback, sendMessage } from "./api";
+import { ApiError, sendFeedback, sendMessage } from "./api";
 import "./i18n";
 import { initialLanguage, persistLanguage } from "./i18n";
 import { clearSession, loadSession, saveSession } from "./storage";
@@ -48,13 +47,15 @@ const actions = [
 ] as const;
 
 const starterKeys = ["courses", "admissions", "hostel"] as const;
-type ErrorKey = "connection" | "feedback";
+type NoticeKey = "feedbackSaved";
+const languageOptions: Language[] = ["en", "te", "hi"];
 
-function createWelcome(content: string): ChatMessage {
+function createWelcome(content: string, language: Language): ChatMessage {
   return {
     id: "welcome",
     role: "assistant",
     content,
+    language,
     created_at: new Date().toISOString(),
     confidence: "verified",
   };
@@ -69,34 +70,113 @@ function uniqueMessages(items: ChatMessage[]) {
   });
 }
 
+function displayLanguage(message: ChatMessage): Language {
+  if (message.language) return message.language;
+  // Sessions saved by older widget versions lacked message language. This is a
+  // display-only migration path; new messages carry the API/client language.
+  if (/[ఀ-౿]/u.test(message.content)) return "te";
+  if (/[ऀ-ॿ]/u.test(message.content)) return "hi";
+  return "en";
+}
+
+function LanguageSelector({ language, onChange }: { language: Language; onChange: (language: Language) => void }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!event.composedPath().includes(menuRef.current as EventTarget)) setExpanded(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [expanded]);
+
+  return (
+    <div className="ciet-language" ref={menuRef}>
+      <button
+        className="ciet-language-trigger"
+        type="button"
+        aria-label={t("header.language")}
+        aria-haspopup="menu"
+        aria-expanded={expanded}
+        aria-controls="ciet-language-menu"
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <Languages size={14} />
+        <span lang={language}>{t(`language.${language}`)}</span>
+        <ChevronDown className={expanded ? "ciet-language-chevron--open" : undefined} size={14} />
+      </button>
+      {expanded && (
+        <div id="ciet-language-menu" className="ciet-language-menu" role="menu" aria-label={t("header.language")}>
+          {languageOptions.map((option) => (
+            <button
+              key={option}
+              className="ciet-language-option"
+              type="button"
+              role="menuitemradio"
+              aria-checked={option === language}
+              lang={option}
+              data-language={option}
+              onClick={() => {
+                onChange(option);
+                setExpanded(false);
+              }}
+            >
+              <span>{t(`language.${option}`)}</span>
+              {option === language && <Check size={14} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Widget({ config }: { config: WidgetConfig }) {
   const { t, i18n } = useTranslation();
-  const widgetPosition = "bottom-right";
+  const widgetPosition = config.position;
   const saved = useMemo(loadSession, []);
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [language, setLanguage] = useState<Language>(() => initialLanguage());
   const [messages, setMessages] = useState<ChatMessage[]>(
-    saved.messages.length ? uniqueMessages(saved.messages) : [createWelcome(t("welcome.message"))],
+    saved.messages.length ? uniqueMessages(saved.messages) : [createWelcome(t("welcome.message"), language)],
   );
   const [conversationId, setConversationId] = useState<string | null>(
     saved.conversationId,
   );
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<ErrorKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeKey | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [size, setSize] = useState({ width: 420, height: 720 });
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
   const resizeRef = useRef<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
+
+  useEffect(() => {
+    const openWidget = () => { setOpen(true); setMinimized(false); };
+    window.addEventListener("ciet-ai:open", openWidget);
+    return () => window.removeEventListener("ciet-ai:open", openWidget);
+  }, []);
 
   useEffect(() => {
     void i18n.changeLanguage(language);
     persistLanguage(language);
     setMessages((current) => {
       if (current.length === 1 && current[0]?.id === "welcome") {
-        return [createWelcome(i18n.getFixedT(language)("welcome.message"))];
+        return [createWelcome(i18n.getFixedT(language)("welcome.message"), language)];
       }
       return current;
     });
@@ -113,6 +193,28 @@ export function Widget({ config }: { config: WidgetConfig }) {
     field.style.height = "auto";
     field.style.height = `${Math.min(field.scrollHeight, 112)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (open && !minimized) inputRef.current?.focus();
+  }, [open, minimized]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      setMinimized(false);
+      window.requestAnimationFrame(() => launcherRef.current?.focus());
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open]);
+
+  const closeWidget = () => {
+    setOpen(false);
+    setMinimized(false);
+    window.requestAnimationFrame(() => launcherRef.current?.focus());
+  };
 
   useEffect(() => {
     const onMove = (event: PointerEvent) => {
@@ -145,6 +247,7 @@ export function Widget({ config }: { config: WidgetConfig }) {
       id: crypto.randomUUID(),
       role: "user",
       content: value,
+      language,
       created_at: new Date().toISOString(),
     };
     const next = uniqueMessages(
@@ -157,17 +260,31 @@ export function Widget({ config }: { config: WidgetConfig }) {
     setError(null);
     setLoading(true);
     try {
+      const responseLanguage = language;
       const response = await sendMessage(
         config,
         value,
-        language,
+        responseLanguage,
         conversationId,
-        next,
       );
       setConversationId(response.conversation_id);
-      setMessages((current) => uniqueMessages([...current, response.message]));
-    } catch {
-      setError("connection");
+      setMessages((current) => uniqueMessages([...current, { ...response.message, language: response.message.language ?? responseLanguage }]));
+    } catch (caught) {
+      if (caught instanceof ApiError) {
+        if (caught.status === 408) setError(t("errors.timeout"));
+        else if (caught.status === 401) setError(t("errors.unauthorized"));
+        else if (caught.status === 403) setError(t("errors.forbidden"));
+        else if (caught.status === 404) setError(t("errors.notFound"));
+        else if (caught.status === 409) setError(t("errors.conflict"));
+        else if (caught.status === 422) setError(t("errors.invalidRequest"));
+        else if (caught.status === 429) setError(t("errors.rateLimit"));
+        else if ([500, 502, 503].includes(caught.status)) setError(t("errors.server"));
+        else if (caught.status >= 500) setError(t("errors.server"));
+        else if (caught.status === 0) setError(t("errors.connection"));
+        else setError(caught.message);
+      } else {
+        setError(t("errors.connection"));
+      }
     } finally {
       setLoading(false);
     }
@@ -176,7 +293,7 @@ export function Widget({ config }: { config: WidgetConfig }) {
   const clear = () => {
     clearSession();
     setConversationId(null);
-    setMessages([createWelcome(t("welcome.message"))]);
+    setMessages([createWelcome(t("welcome.message"), language)]);
     setError(null);
   };
 
@@ -192,35 +309,31 @@ export function Widget({ config }: { config: WidgetConfig }) {
     );
     try {
       await sendFeedback(config, message.id, rating);
+      setNotice("feedbackSaved");
+      window.setTimeout(() => setNotice(null), 2200);
     } catch {
-      setError("feedback");
+      setMessages((current) =>
+        current.map((item) => (item.id === message.id ? { ...item, feedback: undefined } : item)),
+      );
+      setError(t("errors.feedback"));
     }
   };
 
   return (
-    <LazyMotion features={domAnimation}>
-      <div className={`ciet-widget ciet-widget--${widgetPosition}`}>
-      <AnimatePresence>
+    <div className={`ciet-widget ciet-widget--${widgetPosition}`} lang={language}>
         {!open && (
-          <m.div
-            className="ciet-launch-wrap"
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9 }}
-          >
+          <div className="ciet-launch-wrap">
             <span className="ciet-tooltip">{t("launcher.tooltip")}</span>
-            <button className="ciet-launcher" onClick={() => setOpen(true)} aria-label={t("launcher.open")}>
+            <button ref={launcherRef} className="ciet-launcher" onClick={() => setOpen(true)} aria-label={t("launcher.open")}>
               <span className="ciet-pulse" />
               <AiRobot className="ciet-launch-logo" />
               <Sparkles className="ciet-launch-spark" size={13} />
             </button>
-          </m.div>
+          </div>
         )}
-      </AnimatePresence>
 
-      <AnimatePresence>
         {open && (
-          <m.section
+          <section
             className={`ciet-panel ${minimized ? "ciet-panel--minimized" : ""}`}
             style={
               {
@@ -230,10 +343,8 @@ export function Widget({ config }: { config: WidgetConfig }) {
               } as CSSProperties
             }
             role="dialog"
+            aria-modal="false"
             aria-label={t("header.dialog")}
-            initial={{ opacity: 0, y: 18, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.97 }}
           >
             {!minimized && (
               <button
@@ -265,20 +376,12 @@ export function Widget({ config }: { config: WidgetConfig }) {
               </div>
               <div className="ciet-header-actions">
                 {!minimized && (
-                  <label className="ciet-language">
-                    <Languages size={14} />
-                    <select value={language} onChange={(event) => setLanguage(event.target.value as Language)} aria-label={t("header.language")}>
-                      <option value="en">{t("language.en")}</option>
-                      <option value="te">{t("language.te")}</option>
-                      <option value="hi">{t("language.hi")}</option>
-                    </select>
-                    <ChevronDown size={11} />
-                  </label>
+                  <LanguageSelector language={language} onChange={setLanguage} />
                 )}
                 <button onClick={() => setMinimized(!minimized)} aria-label={minimized ? t("header.restore") : t("header.minimize")}>
                   {minimized ? <MessageCircle size={17} /> : <Minus size={18} />}
                 </button>
-                <button onClick={() => { setOpen(false); setMinimized(false); }} aria-label={t("header.close")}>
+                <button onClick={closeWidget} aria-label={t("header.close")}>
                   <X size={18} />
                 </button>
               </div>
@@ -286,15 +389,18 @@ export function Widget({ config }: { config: WidgetConfig }) {
 
             {!minimized && (
               <>
-                <div className="ciet-trust"><ShieldCheck size={14} /> {t("trust")}</div>
-                <div className="ciet-messages" aria-live="polite">
+                <div className="ciet-trust">
+                  <ShieldCheck size={14} />
+                  <span>{t("trust")}</span>
+                  <i aria-hidden="true" />
+                  <span className="ciet-trust-secondary">{t("brand.subtitle")}</span>
+                </div>
+                <div className="ciet-messages" aria-live="polite" aria-label={t("chat.history")} tabIndex={0}>
                   {messages.map((message, index) => (
-                    <m.article
+                    <article
                       key={message.id}
                       className={`ciet-message-row ciet-message-row--${message.role}`}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.18 }}
+                      lang={displayLanguage(message)}
                     >
                       {message.role === "assistant" && <span className="ciet-avatar"><Sparkles size={13} /></span>}
                       <div className="ciet-message-wrap">
@@ -305,11 +411,16 @@ export function Widget({ config }: { config: WidgetConfig }) {
                         </div>
                         {message.citations?.length ? (
                           <div className="ciet-citations">
-                            {message.citations.map((citation, citationIndex) => (
+                            {message.citations.map((citation, citationIndex) => citation.url ? (
                               <a href={citation.url} target="_blank" rel="noreferrer" key={`${citation.title}-${citationIndex}`}>
                                 <BookOpen size={12} />
                                 <span>{citation.title}{citation.section ? ` · ${citation.section}` : ""}</span>
                               </a>
+                            ) : (
+                              <span className="ciet-citation" key={`${citation.title}-${citationIndex}`}>
+                                <BookOpen size={12} />
+                                <span>{citation.title}{citation.section ? ` · ${citation.section}` : ""}</span>
+                              </span>
                             ))}
                           </div>
                         ) : null}
@@ -323,7 +434,7 @@ export function Widget({ config }: { config: WidgetConfig }) {
                           </div>
                         )}
                       </div>
-                    </m.article>
+                    </article>
                   ))}
                   {loading && (
                     <div className="ciet-message-row">
@@ -331,7 +442,8 @@ export function Widget({ config }: { config: WidgetConfig }) {
                       <div className="ciet-typing" aria-label={t("chat.loading")}><i /><i /><i /></div>
                     </div>
                   )}
-                  {error && <div className="ciet-error">{t(`errors.${error}`)}</div>}
+                  {error && <div className="ciet-error">{error}</div>}
+                  {notice && <div className="ciet-notice" role="status">{t(`notices.${notice}`)}</div>}
                   <div ref={endRef} />
                 </div>
 
@@ -366,10 +478,8 @@ export function Widget({ config }: { config: WidgetConfig }) {
                 </footer>
               </>
             )}
-          </m.section>
+          </section>
         )}
-      </AnimatePresence>
-      </div>
-    </LazyMotion>
+    </div>
   );
 }

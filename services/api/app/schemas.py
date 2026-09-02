@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 Language = Literal["en", "te", "hi"]
@@ -19,25 +19,26 @@ class Citation(BaseModel):
 
 class HistoryMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(min_length=1, max_length=3000)
 
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
     language: Language = "en"
     channel: Channel = "website"
-    conversation_id: str | None = None
-    user_ref: str | None = None
-    history: list[HistoryMessage] = []
+    conversation_id: str | None = Field(default=None, max_length=36)
+    user_ref: str | None = Field(default=None, max_length=255)
+    history: list[HistoryMessage] = Field(default_factory=list, max_length=10)
 
 
 class ChatMessageOut(BaseModel):
     id: str
     role: Literal["assistant"]
     content: str
+    language: Language
     created_at: datetime
     confidence: Confidence
-    citations: list[Citation] = []
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -47,26 +48,98 @@ class ChatResponse(BaseModel):
 
 
 class FeedbackIn(BaseModel):
+    message_id: str = Field(min_length=36, max_length=36)
+    rating: Literal["up", "down"]
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class FeedbackOut(BaseModel):
+    id: str
     message_id: str
     rating: Literal["up", "down"]
     comment: str | None = None
+    message_content: str
+    conversation_id: str
+    created_at: datetime
+
+
+class HandoffTicketIn(BaseModel):
+    conversation_id: str = Field(min_length=36, max_length=36)
+    contact: str = Field(min_length=3, max_length=255)
+    contact_consent: Literal[True]
+
+
+class HandoffTicketUpdateIn(BaseModel):
+    status: Literal["open", "in_progress", "resolved", "closed"]
+    internal_note: str | None = Field(default=None, max_length=4000)
+
+
+class HandoffTicketOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    conversation_id: str
+    status: str
+    contact: str | None
+    contact_consent: bool
+    internal_note: str | None
+    resolved_by_id: str | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: str = Field(
+        min_length=3,
+        max_length=255,
+        pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$",
+        validation_alias=AliasChoices("email", "username"),
+    )
+    password: str = Field(min_length=8, max_length=72)
 
 
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class AuthSessionOut(BaseModel):
+    authenticated: Literal[True] = True
+    email: str | None = None
+    role: str | None = None
+
+
+class GenericMessageOut(BaseModel):
+    message: str
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str = Field(min_length=8, max_length=72)
+    new_password: str = Field(min_length=8, max_length=72)
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str = Field(min_length=3, max_length=255, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+    new_password: str = Field(min_length=8, max_length=72)
+
+
+class AdminInvitationIn(BaseModel):
+    email: str = Field(min_length=3, max_length=255, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    role: Literal["admin", "viewer", "admissions_admin", "placement_admin", "content_admin"]
+
+
+class AcceptInvitationIn(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+    password: str = Field(min_length=8, max_length=72)
 
 
 class FAQIn(BaseModel):
-    question: str
-    answer: str
+    question: str = Field(min_length=1, max_length=1000)
+    answer: str = Field(min_length=1, max_length=10000)
     language: Language = "en"
-    source: str = "Verified FAQ"
+    source: str = Field(default="Verified FAQ", min_length=1, max_length=255)
     is_active: bool = True
 
 
@@ -84,11 +157,11 @@ class PaginatedFAQs(BaseModel):
 
 
 class MetricIn(BaseModel):
-    name: str
-    value: str
-    unit: str | None = None
-    verified_by: str
-    source: str = "Verified Metrics"
+    name: str = Field(min_length=1, max_length=180)
+    value: str = Field(min_length=1, max_length=10000)
+    unit: str | None = Field(default=None, max_length=40)
+    verified_by: str = Field(min_length=1, max_length=180)
+    source: str = Field(default="Verified Metrics", min_length=1, max_length=255)
     is_sensitive_stat: bool = True
 
 
@@ -139,7 +212,14 @@ class JobOut(BaseModel):
 
 
 class DomainIn(BaseModel):
-    domain: str
+    domain: str = Field(
+        min_length=1,
+        max_length=255,
+        pattern=(
+            r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+            r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"
+        ),
+    )
     is_active: bool = True
 
 
@@ -182,4 +262,4 @@ class RetrievalResult(BaseModel):
     route: Route
     confidence: Confidence
     score: float
-    citations: list[Citation] = []
+    citations: list[Citation] = Field(default_factory=list)

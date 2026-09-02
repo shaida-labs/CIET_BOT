@@ -2,6 +2,9 @@
   "name": "ciet-ai-platform",
   "private": true,
   "version": "2.0.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "workspaces": [
     "apps/*"
   ],
@@ -12,10 +15,15 @@
     "build": "npm run build --workspaces",
     "lint": "npm run lint --workspaces",
     "test": "npm run test --workspaces --if-present",
+    "test:e2e": "node e2e/readiness.mjs",
+    "test:e2e:widget-i18n": "node e2e/widget-i18n.mjs",
+    "test:e2e:live": "node e2e/live-readiness.mjs",
+    "test:a11y:live": "node e2e/accessibility.mjs",
     "api:dev": "cd services/api && uvicorn app.main:app --reload --port 8000",
     "api:test": "cd services/api && pytest"
   },
   "devDependencies": {
+    "@axe-core/puppeteer": "^4.13.0",
     "puppeteer": "^25.3.0"
   }
 }

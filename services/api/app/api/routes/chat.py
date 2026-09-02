@@ -1,40 +1,113 @@
+import json
+import secrets
 import uuid
 
-import asyncio
-import json
-
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.rate_limit import limiter
 from app.db.session import get_session
-from app.models import AnalyticsEvent, Channel, Conversation, ConversationMessage
-from app.schemas import ChatMessageOut, ChatRequest, ChatResponse, FeedbackIn
+from app.models import AnalyticsEvent, Channel, Conversation, ConversationMessage, Feedback, HandoffTicket
+from app.schemas import (
+    ChatMessageOut,
+    ChatRequest,
+    ChatResponse,
+    FeedbackIn,
+    HandoffTicketIn,
+    HandoffTicketOut,
+)
+from app.services.language import detect_language
 from app.services.retrieval import RetrievalService
 
 router = APIRouter(tags=["chat"])
+WIDGET_VISITOR_COOKIE = "ciet_widget_visitor"
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(
+def resolve_widget_visitor(request: Request) -> tuple[str, bool]:
+    """Return the browser-bound anonymous owner for website conversations.
+
+    IP addresses and client-supplied identifiers are not ownership credentials:
+    they are shared or spoofable.  The opaque cookie is HttpOnly and is only
+    accepted from an allowed widget origin by DomainSecurityMiddleware.
+    """
+    cookies = getattr(request, "cookies", {})
+    visitor = cookies.get(WIDGET_VISITOR_COOKIE) if cookies else None
+    if visitor and len(visitor) >= 32:
+        return visitor, False
+    return secrets.token_urlsafe(32), True
+
+
+def set_widget_visitor_cookie(response: Response, visitor: str, settings: Settings) -> None:
+    response.set_cookie(
+        WIDGET_VISITOR_COOKIE,
+        visitor,
+        httponly=True,
+        secure=settings.secure_cookies,
+        # CIET widgets are commonly embedded on a distinct CIET web origin.
+        # SameSite=None is required for that supported production deployment;
+        # local development retains Lax without HTTPS.
+        samesite="none" if settings.secure_cookies else "lax",
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+    )
+
+
+async def recent_conversation_memory(
+    session: AsyncSession, conversation_id: str, settings: Settings
+) -> list[tuple[str, str]]:
+    """Load a bounded, server-authoritative history for one owned conversation."""
+    if not settings.conversation_memory_messages or not settings.conversation_memory_characters:
+        return []
+    messages = list(
+        (
+            await session.scalars(
+                select(ConversationMessage)
+                .where(ConversationMessage.conversation_id == conversation_id)
+                .order_by(ConversationMessage.created_at.desc())
+                .limit(settings.conversation_memory_messages)
+            )
+        ).all()
+    )
+    remaining = settings.conversation_memory_characters
+    memory: list[tuple[str, str]] = []
+    for message in messages:
+        if remaining <= 0:
+            break
+        content = message.content[:remaining]
+        if content:
+            memory.append((message.role, content))
+            remaining -= len(content)
+    return list(reversed(memory))
+
+
+async def process_chat(
     payload: ChatRequest,
     request: Request,
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
+    session: AsyncSession,
+    settings: Settings,
+    owner: str,
 ) -> ChatResponse:
+    """Execute a chat request after the trusted channel owner is established."""
+    language = detect_language(payload.message, payload.language)
     conversation = None
     if payload.conversation_id:
         conversation = await session.get(Conversation, payload.conversation_id)
+        if conversation and (conversation.channel != Channel(payload.channel) or conversation.user_ref != owner):
+            raise HTTPException(status_code=403, detail="Conversation does not belong to this client")
     if not conversation:
         conversation = Conversation(
             id=str(uuid.uuid4()),
             channel=Channel(payload.channel),
-            user_ref=payload.user_ref or request.client.host if request.client else None,
-            language=payload.language,
+            user_ref=owner,
+            language=language,
         )
         session.add(conversation)
         await session.flush()
+
+    memory = await recent_conversation_memory(session, conversation.id, settings)
 
     session.add(
         ConversationMessage(
@@ -44,7 +117,12 @@ async def chat(
         )
     )
     retrieval = RetrievalService(settings)
-    result, latency_ms = await retrieval.answer(session, payload.message, payload.language)
+    result, latency_ms = await retrieval.answer(
+        session,
+        payload.message,
+        language,
+        conversation_memory=memory,
+    )
     assistant = ConversationMessage(
         conversation_id=conversation.id,
         role="assistant",
@@ -76,6 +154,7 @@ async def chat(
             id=assistant.id,
             role="assistant",
             content=assistant.content,
+            language=language,
             created_at=assistant.created_at,
             confidence=result.confidence,
             citations=result.citations,
@@ -83,11 +162,44 @@ async def chat(
     )
 
 
-@router.post("/feedback", status_code=204)
-async def feedback(payload: FeedbackIn, session: AsyncSession = Depends(get_session)) -> None:
-    from app.models import Feedback
+@router.post("/chat", response_model=ChatResponse)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
+async def chat(
+    payload: ChatRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ChatResponse:
+    if payload.channel != "website":
+        raise HTTPException(status_code=403, detail="This endpoint only accepts website chat")
+    visitor, created = resolve_widget_visitor(request)
+    result = await process_chat(payload, request, session, settings, visitor)
+    if created:
+        set_widget_visitor_cookie(response, visitor, settings)
+    return result
 
-    session.add(Feedback(message_id=payload.message_id, rating=payload.rating, comment=payload.comment))
+
+@router.post("/feedback", status_code=204)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
+async def feedback(
+    payload: FeedbackIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    message = await session.get(ConversationMessage, payload.message_id)
+    if not message or message.role != "assistant":
+        raise HTTPException(status_code=404, detail="Assistant message not found")
+    conversation = await session.get(Conversation, message.conversation_id)
+    visitor, _ = resolve_widget_visitor(request)
+    if not conversation or conversation.channel != Channel.website or conversation.user_ref != visitor:
+        raise HTTPException(status_code=403, detail="Message does not belong to this client")
+    item = await session.scalar(select(Feedback).where(Feedback.message_id == payload.message_id))
+    if item:
+        item.rating = payload.rating
+        item.comment = payload.comment
+    else:
+        session.add(Feedback(message_id=payload.message_id, rating=payload.rating, comment=payload.comment))
     session.add(
         AnalyticsEvent(
             event_type="feedback",
@@ -98,22 +210,67 @@ async def feedback(payload: FeedbackIn, session: AsyncSession = Depends(get_sess
     await session.commit()
 
 
+@router.post("/support/tickets", response_model=HandoffTicketOut, status_code=201)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
+async def create_handoff_ticket(
+    payload: HandoffTicketIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> HandoffTicket:
+    """Create a consented support request for the caller's own conversation only."""
+    visitor, _ = resolve_widget_visitor(request)
+    conversation = await session.get(Conversation, payload.conversation_id)
+    if (
+        not conversation
+        or conversation.channel != Channel.website
+        or conversation.user_ref != visitor
+    ):
+        raise HTTPException(status_code=403, detail="Conversation does not belong to this client")
+    ticket = HandoffTicket(
+        conversation_id=conversation.id,
+        contact=payload.contact.strip(),
+        contact_consent=True,
+    )
+    session.add(ticket)
+    await session.flush()
+    session.add(
+        AnalyticsEvent(
+            event_type="handoff_requested",
+            channel=Channel.website,
+            metadata_={"conversation_id": conversation.id, "ticket_id": ticket.id},
+        )
+    )
+    await session.commit()
+    await session.refresh(ticket)
+    return ticket
+
+
 @router.post("/chat/stream")
+@limiter.limit(lambda: get_settings().chat_rate_limit)
 async def chat_stream(
     payload: ChatRequest,
     request: Request,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
-    response = await chat(payload, request, session, settings)
+    if payload.channel != "website":
+        raise HTTPException(status_code=403, detail="This endpoint only accepts website chat")
+    visitor, created = resolve_widget_visitor(request)
+    response = await process_chat(payload, request, session, settings, visitor)
 
     async def events():
         yield f"event: metadata\ndata: {json.dumps({'conversation_id': response.conversation_id, 'route': response.route})}\n\n"
-        for token in response.message.content.split():
-            if await request.is_disconnected():
-                break
-            yield f"event: token\ndata: {json.dumps({'token': token + ' '})}\n\n"
-            await asyncio.sleep(0.015)
-        yield f"event: done\ndata: {response.message.model_dump_json()}\n\n"
+        # This is intentionally a buffered SSE response.  The retrieval path
+        # currently persists an answer before responding; emitting split words
+        # would falsely imply that they came from a provider token stream.
+        yield f"event: message\ndata: {response.message.model_dump_json()}\n\n"
+        yield "event: done\ndata: {}\n\n"
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    stream = StreamingResponse(
+        events(),
+        media_type="text/event-stream; charset=utf-8",
+        headers={"X-CIET-Streaming-Mode": "buffered"},
+    )
+    if created:
+        set_widget_visitor_cookie(stream, visitor, settings)
+    return stream
