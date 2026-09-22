@@ -1,7 +1,7 @@
+import json
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
-import json
 from urllib.parse import urljoin, urlparse
 
 import httpx

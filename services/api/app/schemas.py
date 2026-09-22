@@ -3,11 +3,17 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-
 Language = Literal["en", "te", "hi"]
 Channel = Literal["website", "whatsapp", "admin"]
 Route = Literal["faq", "metric", "rag", "website", "fallback"]
 Confidence = Literal["verified", "high", "medium", "low"]
+
+# Client-supplied identifiers are bound to PostgreSQL UUID columns.  Validating
+# the format during request parsing returns 422 instead of letting asyncpg raise
+# a DataError from inside the handler, which surfaces as an unhandled 500.
+UUID_PATTERN = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 class Citation(BaseModel):
@@ -26,7 +32,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=3000)
     language: Language = "en"
     channel: Channel = "website"
-    conversation_id: str | None = Field(default=None, max_length=36)
+    conversation_id: str | None = Field(default=None, pattern=UUID_PATTERN)
     user_ref: str | None = Field(default=None, max_length=255)
     history: list[HistoryMessage] = Field(default_factory=list, max_length=10)
 
@@ -47,8 +53,31 @@ class ChatResponse(BaseModel):
     route: Route
 
 
+class TranslateMessageIn(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=3000)
+
+
+class TranslateRequest(BaseModel):
+    language: Language
+    messages: list[TranslateMessageIn] = Field(min_length=1, max_length=40)
+
+
+class TranslateMessageOut(BaseModel):
+    id: str
+    content: str
+    translated: bool
+
+
+class TranslateResponse(BaseModel):
+    language: Language
+    translated: bool
+    messages: list[TranslateMessageOut]
+
+
 class FeedbackIn(BaseModel):
-    message_id: str = Field(min_length=36, max_length=36)
+    message_id: str = Field(pattern=UUID_PATTERN)
     rating: Literal["up", "down"]
     comment: str | None = Field(default=None, max_length=1000)
 
@@ -64,7 +93,7 @@ class FeedbackOut(BaseModel):
 
 
 class HandoffTicketIn(BaseModel):
-    conversation_id: str = Field(min_length=36, max_length=36)
+    conversation_id: str = Field(pattern=UUID_PATTERN)
     contact: str = Field(min_length=3, max_length=255)
     contact_consent: Literal[True]
 
@@ -101,10 +130,21 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=8, max_length=72)
 
 
+class OtpRequestIn(BaseModel):
+    challenge: str = Field(min_length=32, max_length=512)
+
+
+class OtpVerifyIn(BaseModel):
+    challenge: str = Field(min_length=32, max_length=512)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
 class AuthSessionOut(BaseModel):
     authenticated: Literal[True] = True
     email: str | None = None
     role: str | None = None
+    challenge: str | None = None
+    otp_required: bool = False
 
 
 class GenericMessageOut(BaseModel):
@@ -126,12 +166,14 @@ class ResetPasswordIn(BaseModel):
 
 
 class AdminInvitationIn(BaseModel):
+    name: str = Field(default="CIET Administrator", min_length=1, max_length=180)
     email: str = Field(min_length=3, max_length=255, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
     role: Literal["admin", "viewer", "admissions_admin", "placement_admin", "content_admin"]
 
 
 class AcceptInvitationIn(BaseModel):
     token: str = Field(min_length=32, max_length=512)
+    name: str = Field(default="CIET Administrator", min_length=1, max_length=180)
     password: str = Field(min_length=8, max_length=72)
 
 

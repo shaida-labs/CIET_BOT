@@ -27,4 +27,4 @@ async def readyz(
         raise HTTPException(status_code=503, detail="Required service is unavailable") from exc
     finally:
         await redis.aclose()
-    return {"status": "ready", "ai": "configured" if settings.openai_api_key else "degraded"}
+    return {"status": "ready", "ai": "configured" if settings.llm_configured else "degraded"}

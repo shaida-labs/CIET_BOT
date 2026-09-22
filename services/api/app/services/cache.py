@@ -1,11 +1,13 @@
-import hashlib
 import asyncio
+import hashlib
 
+import structlog
 from redis.asyncio import Redis
 
 from app.core.config import Settings
 from app.schemas import RetrievalResult
 
+logger = structlog.get_logger()
 
 VERSION_KEY = "ciet:knowledge:version"
 
@@ -22,8 +24,8 @@ def _client(settings: Settings) -> Redis:
 async def _close(redis: Redis) -> None:
     try:
         await asyncio.wait_for(redis.aclose(), timeout=0.1)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("redis_close_failed", error_type=type(exc).__name__)
 
 
 async def get_cached_answer(settings: Settings, query: str, language: str) -> RetrievalResult | None:
@@ -34,7 +36,8 @@ async def get_cached_answer(settings: Settings, query: str, language: str) -> Re
             digest = hashlib.sha256(f"{language}:{query.casefold().strip()}".encode()).hexdigest()
             value = await redis.get(f"ciet:answer:{version}:{digest}")
             return RetrievalResult.model_validate_json(value) if value else None
-    except Exception:
+    except Exception as exc:
+        logger.debug("redis_cache_read_failed", error_type=type(exc).__name__)
         return None
     finally:
         await _close(redis)
@@ -51,8 +54,8 @@ async def cache_answer(settings: Settings, query: str, language: str, result: Re
                 settings.response_cache_seconds,
                 result.model_dump_json(),
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("redis_cache_write_failed", error_type=type(exc).__name__)
     finally:
         await _close(redis)
 
@@ -62,7 +65,7 @@ async def invalidate_knowledge_cache(settings: Settings) -> None:
     try:
         async with asyncio.timeout(0.35):
             await redis.incr(VERSION_KEY)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("redis_cache_invalidate_failed", error_type=type(exc).__name__)
     finally:
         await _close(redis)

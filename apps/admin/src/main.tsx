@@ -15,15 +15,21 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  UserPlus,
   UploadCloud,
 } from "lucide-react";
 import { ApiError, client, Document, FAQ, logout, Metric, type Analytics, type Feedback as FeedbackItem } from "./api";
 import { CietLogo } from "./CietLogo";
 import "./styles.css";
 
-type View = "dashboard" | "documents" | "faqs" | "metrics" | "conversations" | "feedback";
+type View = "dashboard" | "documents" | "faqs" | "metrics" | "conversations" | "feedback" | "administrators";
 
 function App() {
+  if (window.location.pathname === "/accept-invitation" || window.location.pathname.endsWith("/accept-invitation")) return <AcceptInvitation />;
+  return <AuthenticatedAdmin />;
+}
+
+function AuthenticatedAdmin() {
   const [authed, setAuthed] = useState<boolean | undefined>();
   useEffect(() => {
     void client.session().then(() => setAuthed(true)).catch(() => setAuthed(false));
@@ -33,20 +39,112 @@ function App() {
   return <Shell onLogout={() => { void logout().finally(() => setAuthed(false)); }} />;
 }
 
+function AcceptInvitation() {
+  const token = new URLSearchParams(window.location.search).get("token") ?? "";
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const accept = async () => {
+    if (!token) {
+      setError("This invitation link is missing its token.");
+      return;
+    }
+    if (password !== confirmation) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await client.acceptInvitation({ token, name, password });
+      setNotice(result.message);
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 400 ? "This invitation is invalid or expired." : "The invitation could not be accepted.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <main className="login"><section><div className="mark"><CietLogo /></div><h1>Accept CIET AI invitation</h1><p>Set your administrator name and a strong password, then sign in to complete email verification.</p><form onSubmit={(event) => { event.preventDefault(); void accept(); }}><label>Full name<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label>Password<input required minLength={12} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><label>Confirm password<input required minLength={12} type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>{error && <strong className="error" role="alert">{error}</strong>}{notice && <strong className="success" role="status">{notice}</strong>}<button type="submit" disabled={busy}>{busy ? "Activating…" : "Activate administrator account"}</button></form></section></main>;
+}
+
 function Login({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [resendIn, setResendIn] = useState(0);
   const [error, setError] = useState("");
-  const submit = async (bootstrap = false) => {
+  useEffect(() => {
+    if (!resendIn) return;
+    const timer = window.setInterval(() => setResendIn((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [resendIn]);
+  const submit = async () => {
     setError("");
     try {
-      await (bootstrap ? client.bootstrap(email, password) : client.login(email, password));
-      onLogin();
+      const result = await client.login(email, password);
+      if (!result.challenge) throw new Error("The verification challenge was not created.");
+      setChallenge(result.challenge);
+      setResendIn(60);
     } catch (caught) {
-      const detail = loginErrorMessage(caught, bootstrap);
-      setError(detail);
+      setError(loginErrorMessage(caught));
     }
   };
+  const verify = async () => {
+    if (!challenge || code.length !== 6) return;
+    setError("");
+    try {
+      await client.verifyOtp(challenge, code);
+      onLogin();
+    } catch (caught) {
+      setError(loginErrorMessage(caught, "otp"));
+    }
+  };
+  const resend = async () => {
+    if (!challenge || resendIn) return;
+    setError("");
+    try {
+      const result = await client.resendOtp(challenge);
+      if (result.challenge) setChallenge(result.challenge);
+      setCode("");
+      setResendIn(60);
+    } catch (caught) {
+      setError(loginErrorMessage(caught));
+    }
+  };
+  if (challenge) {
+    return (
+      <main className="login">
+        <section>
+          <div className="mark"><CietLogo /></div>
+          <h1>Verify your email</h1>
+          <p>A six-digit verification code was sent to {maskEmail(email)}.</p>
+          <form onSubmit={(event) => { event.preventDefault(); void verify(); }}>
+            <label htmlFor="admin-otp">Verification code</label>
+            <input
+              id="admin-otp"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              aria-label="Six-digit verification code"
+              value={code}
+              onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+              autoFocus
+            />
+            {error && <strong className="error" role="alert">{error}</strong>}
+            <button type="submit" disabled={code.length !== 6}><Lock size={16} /> Verify</button>
+            <button type="button" className="ghost" disabled={resendIn > 0} onClick={() => void resend()}>
+              {resendIn ? `Resend available in 00:${String(resendIn).padStart(2, "0")}` : "Resend code"}
+            </button>
+          </form>
+        </section>
+      </main>
+    );
+  }
   return (
     <main className="login">
       <section>
@@ -58,23 +156,28 @@ function Login({ onLogin }: { onLogin: () => void }) {
           <label>Password<input type="password" autoComplete="current-password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
           {error && <strong className="error" role="alert">{error}</strong>}
           <button type="submit"><Lock size={16} /> Sign in</button>
-          <button type="button" className="ghost" onClick={() => void submit(true)}>Bootstrap first admin</button>
         </form>
       </section>
     </main>
   );
 }
 
-function loginErrorMessage(error: unknown, bootstrap: boolean) {
+function loginErrorMessage(error: unknown, stage: "password" | "otp" = "password") {
   if (error instanceof ApiError) {
-    if (bootstrap && error.status === 409) return "An administrator already exists. Please sign in.";
-    if (error.status === 401) return "Invalid email or password.";
+    if (error.status === 401) return stage === "otp" ? "Invalid or expired verification code." : "Invalid email or password.";
     if (error.status === 403 && error.message.includes("CSRF")) return "Security validation failed. Refresh the page and try again.";
     if (error.status === 429) return "Too many attempts. Please try again shortly.";
+    if (error.status === 503) return "BLOCKED - EXTERNAL CONFIGURATION REQUIRED: email delivery is not configured.";
     if (error.status >= 500) return "The authentication service is temporarily unavailable.";
     return error.message;
   }
   return "Cannot connect to CIET AI. Check that the API is running.";
+}
+
+function maskEmail(value: string) {
+  const [local, domain] = value.split("@");
+  if (!local || !domain) return value;
+  return `${local.slice(0, 1)}${"*".repeat(Math.max(1, local.length - 1))}@${domain}`;
 }
 
 function Shell({ onLogout }: { onLogout: () => void }) {
@@ -86,6 +189,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
     ["metrics", Database, "Metrics"],
     ["conversations", MessageSquareWarning, "Logs"],
     ["feedback", ShieldCheck, "Feedback"],
+    ["administrators", UserPlus, "Administrators"],
   ];
   return (
     <div className="shell">
@@ -102,9 +206,35 @@ function Shell({ onLogout }: { onLogout: () => void }) {
         {view === "metrics" && <Metrics />}
         {view === "conversations" && <Logs />}
         {view === "feedback" && <Feedback />}
+        {view === "administrators" && <Administrators />}
       </main>
     </div>
   );
+}
+
+function Administrators() {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("content_admin");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const invite = async () => {
+    setBusy(true);
+    setNotice("");
+    setError("");
+    try {
+      const result = await client.inviteAdmin({ name, email, role });
+      setNotice(result.message);
+      setName("");
+      setEmail("");
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 403 ? "Only an authorized administrator can send invitations." : "Invitation could not be sent.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Card title="Invite Administrator"><p>New administrators receive a single-use invitation by official email and must set a password before completing email verification.</p><div className="form"><input aria-label="Administrator name" placeholder="Full name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Administrator email" type="email" placeholder="Official email" value={email} onChange={(event) => setEmail(event.target.value)} /><select aria-label="Administrator role" value={role} onChange={(event) => setRole(event.target.value)}><option value="content_admin">Content Manager</option><option value="admissions_admin">HOD / Admissions</option><option value="placement_admin">Placement Manager</option><option value="viewer">Auditor / Viewer</option><option value="admin">Director</option></select><button disabled={busy || !name.trim() || !email.trim()} onClick={() => void invite()}><UserPlus size={15} /> Send invitation</button></div>{notice && <p className="success" role="status">{notice}</p>}{error && <p className="error" role="alert">{error}</p>}</Card>;
 }
 
 function Dashboard() {
@@ -287,7 +417,10 @@ function Stat({ label, value, icon: Icon }: { label: string; value: string | num
 
 function Table({ rows, empty }: { rows: React.ReactNode[][]; empty: string }) {
   if (!rows.length) return <p className="empty">{empty}</p>;
-  return <div className="table" role="table">{rows.map((row, index) => <div role="row" key={index} style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}>{row.map((cell, cellIndex) => <span role="cell" key={cellIndex}>{cell}</span>)}</div>)}</div>;
+  // tabIndex keeps the vertically scrollable table reachable by keyboard (axe
+  // scrollable-region-focusable) now that long logs are capped instead of
+  // stretching the document to tens of thousands of pixels.
+  return <div className="table" role="table" tabIndex={0}>{rows.map((row, index) => <div role="row" key={index} style={{ gridTemplateColumns: `repeat(${row.length}, minmax(0, 1fr))` }}>{row.map((cell, cellIndex) => <span role="cell" key={cellIndex}>{cell}</span>)}</div>)}</div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

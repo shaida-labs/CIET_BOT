@@ -48,7 +48,10 @@ async function chooseLanguage(page, language) {
   }, {}, language);
 }
 
-async function ask(page, question, answerFragment) {
+async function ask(page, question, answerFragment, language) {
+  // Mirror a real user: type first, then wait until the send button is enabled
+  // (it is disabled while the composer is empty or a reply is pending), and only
+  // then submit — otherwise a message sent during a pending reply is dropped.
   await page.evaluate((message) => {
     const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
     const textarea = root?.querySelector("textarea");
@@ -56,12 +59,62 @@ async function ask(page, question, answerFragment) {
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     setter?.call(textarea, message);
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.closest("form")?.requestSubmit();
   }, question);
-  await page.waitForFunction((expected) => {
-    const messages = document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelectorAll(".ciet-message--assistant");
-    return [...(messages || [])].some((message) => message.textContent?.includes(expected));
-  }, { timeout: 30_000 }, answerFragment);
+  await page.waitForFunction(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const send = root?.querySelector('.ciet-composer button[type="submit"]');
+    return Boolean(root?.querySelector("textarea")) && send instanceof HTMLButtonElement && !send.disabled;
+  });
+  // Only a reply that arrives after this submission counts: the welcome message
+  // contains "CIET" and would otherwise match the English expectation instantly.
+  const previousAnswers = await page.evaluate(() => [...(
+    document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelectorAll(".ciet-message--assistant") || []
+  )].map((message) => message.textContent || ""));
+  await page.evaluate(() => {
+    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+    const textarea = root?.querySelector("textarea");
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Message input was not mounted");
+    textarea.closest("form")?.requestSubmit();
+  });
+  try {
+    await page.waitForFunction(
+      ({ previousCount, expected, lang }) => {
+        const messages = [...(
+          document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelectorAll(".ciet-message--assistant") || []
+        )].map((message) => message.textContent || "");
+        return messages.length > previousCount && messages.slice(previousCount).some((text) => {
+          if (text.includes(expected)) return true;
+          // With knowledge indexed, a reply may be generated in the requested
+          // language instead of containing the fixed fallback phrase. The i18n
+          // guarantee is that every NEW answer renders in the selected script.
+          if (lang === "te") return /[ఀ-౿]/.test(text);
+          if (lang === "hi") return /[ऀ-ॿ]/.test(text);
+          return false;
+        });
+      },
+      { timeout: 45_000 },
+      { previousCount: previousAnswers.length, expected: answerFragment, lang: language },
+    );
+  } catch (error) {
+    // Report the widget state instead of a bare Puppeteer timeout so a failure
+    // identifies the language, the answers rendered, and any visible error.
+    const diagnostic = await page.evaluate(() => {
+      const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
+      return {
+        lang: root?.querySelector(".ciet-widget")?.getAttribute("lang"),
+        assistant: [...(root?.querySelectorAll(".ciet-message--assistant") || [])].map((m) => m.textContent?.slice(0, 160)),
+        user: [...(root?.querySelectorAll(".ciet-message--user") || [])].map((m) => m.textContent?.slice(0, 80)),
+        error: root?.querySelector(".ciet-error")?.textContent || null,
+        notice: root?.querySelector(".ciet-notice")?.textContent || null,
+        typing: Boolean(root?.querySelector(".ciet-typing")),
+        menuOpen: Boolean(root?.querySelector(".ciet-language-menu")),
+      };
+    });
+    throw new Error(
+      `No assistant answer in the expected language (fragment ${JSON.stringify(answerFragment)}) for question ${JSON.stringify(question)}. `
+      + `Widget state: ${JSON.stringify(diagnostic)}. Browser events: ${JSON.stringify(failures)}. Original: ${error.message}`,
+    );
+  }
 }
 
 async function assertIndicFonts(page) {
@@ -94,7 +147,7 @@ async function assertLayout(page, viewport) {
 await mkdir(evidenceDir, { recursive: true });
 const browser = await puppeteer.launch({
   headless: true,
-  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   args: ["--no-sandbox", "--disable-dev-shm-usage"],
 });
 
@@ -148,21 +201,28 @@ try {
     ).fontFamily);
     if (scenario.language === "te") assert(fontStack.startsWith('"Noto Sans Telugu"'), "Telugu UI did not select Noto Sans Telugu");
     if (scenario.language === "hi") assert(fontStack.startsWith('"Noto Sans Devanagari"'), "Hindi UI did not select Noto Sans Devanagari");
-    await ask(page, scenario.question, scenario.answerFragment);
+    await ask(page, scenario.question, scenario.answerFragment, scenario.language);
     await assertLayout(page, desktop);
     await page.screenshot({ path: path.join(evidenceDir, `${scenario.language}-desktop.png`), fullPage: true });
   }
-  const preservedMessageLanguages = await page.evaluate(() => {
-    const root = document.querySelector("ciet-ai-assistant")?.shadowRoot;
-    return {
-      telugu: Boolean(root?.querySelector('.ciet-message-row[lang="te"]')),
-      hindi: Boolean(root?.querySelector('.ciet-message-row[lang="hi"]')),
-    };
-  });
-  assert(
-    preservedMessageLanguages.telugu && preservedMessageLanguages.hindi,
-    "Messages must retain their own language metadata after an interface language switch",
-  );
+  // A language switch must re-render the ENTIRE conversation, history
+  // included: wait until every stored line has been translated into the
+  // current interface language (Hindi, from the final scenario).
+  try {
+    await page.waitForFunction(() => {
+      const rows = [...(
+        document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelectorAll(".ciet-message-row") || []
+      )];
+      return rows.length > 0 && rows.every((row) => row.getAttribute("lang") === "hi");
+    }, { timeout: 60_000 });
+  } catch (error) {
+    const state = await page.evaluate(() => [...(
+      document.querySelector("ciet-ai-assistant")?.shadowRoot?.querySelectorAll(".ciet-message-row") || []
+    )].map((row) => ({ lang: row.getAttribute("lang"), text: row.textContent?.slice(0, 60) })));
+    throw new Error(
+      `Previous chat messages did not change language after switching to Hindi: ${JSON.stringify(state)}. Original: ${error.message}`,
+    );
+  }
 
   const mobile = { width: 390, height: 844 };
   await page.setViewport(mobile);

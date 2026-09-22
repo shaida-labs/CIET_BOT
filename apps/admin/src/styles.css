@@ -51,7 +51,10 @@ header p { margin: 6px 0 0; color: #52635d; }
 .toolbar button { color: #174f43; background: #e8f2e6; }
 .upload { background: #174f43; cursor: pointer; }
 .search { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: #667a73; }
-.table { width: 100%; max-width: 100%; border: 1px solid #e6ece8; border-radius: 14px; overflow-x: auto; }
+/* Bounded height: the logs endpoint returns up to 200 rows, which otherwise
+   makes the document ~23,000px tall on a 375px viewport (unscrollable-by-keyboard,
+   unusable on mobile, and impossible to capture as evidence). */
+.table { width: 100%; max-width: 100%; max-height: min(72vh, 640px); border: 1px solid #e6ece8; border-radius: 14px; overflow: auto; }
 .table > div { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; padding: 13px 15px; border-bottom: 1px solid #edf1ee; }
 .table > div:last-child { border-bottom: 0; }
 .table span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #526861; font-size: 13px; }

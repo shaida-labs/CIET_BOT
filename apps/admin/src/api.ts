@@ -1,4 +1,7 @@
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+// Same-origin on purpose: nginx forwards /api/ to the backend, so the bundle
+// never bakes in a host. This keeps the admin usable from localhost, a LAN IP,
+// or any deployed domain without rebuilding. Vite dev serves the same proxy.
+const API_URL = "";
 
 export type FAQ = { id: string; question: string; answer: string; language: string; source: string; is_active: boolean; updated_at: string };
 export type Metric = { id: string; name: string; value: string; unit?: string; verified_by: string; source: string; is_sensitive_stat: boolean; updated_at: string };
@@ -14,6 +17,7 @@ export type Analytics = {
   document_usage: { title: string; count: number }[];
 };
 export type Feedback = { id: string; message_id: string; rating: "up" | "down"; comment?: string; message_content: string; conversation_id: string; created_at: string };
+export type AuthResponse = { authenticated: true; email?: string; role?: string; challenge?: string; otp_required?: boolean };
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -53,8 +57,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const client = {
-  login: async (email: string, password: string) => api<{ authenticated: true }>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
-  bootstrap: async (email: string, password: string) => api<{ authenticated: true }>("/api/v1/auth/bootstrap", { method: "POST", body: JSON.stringify({ email, password }) }),
+  login: async (email: string, password: string) => api<AuthResponse>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  verifyOtp: async (challenge: string, code: string) => api<AuthResponse>("/api/v1/auth/otp/verify", { method: "POST", body: JSON.stringify({ challenge, code }) }),
+  resendOtp: async (challenge: string) => api<AuthResponse>("/api/v1/auth/otp/request", { method: "POST", body: JSON.stringify({ challenge }) }),
+  inviteAdmin: async (payload: { name: string; email: string; role: string }) => api<{ message: string }>("/api/v1/auth/invitations", { method: "POST", body: JSON.stringify(payload) }),
+  acceptInvitation: async (payload: { token: string; name: string; password: string }) => api<{ message: string }>("/api/v1/auth/accept-invitation", { method: "POST", body: JSON.stringify(payload) }),
   session: async () => api<{ authenticated: true; email: string; role: string }>("/api/v1/auth/session"),
   analytics: async () => api<Analytics>("/api/v1/admin/analytics"),
   faqs: async () => api<FAQ[]>("/api/v1/admin/faqs"),

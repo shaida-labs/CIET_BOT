@@ -25,12 +25,26 @@ PROJECT_ROOT = discover_project_root(API_ROOT)
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 DEFAULT_JWT_SECRET = "local-development-only-change-me-32"
 
+# Providers the LLM layer can chain through (tried in LLM_PROVIDER_ORDER).
+KNOWN_LLM_PROVIDERS = ("openai", "gemini", "groq")
+
+# Documented default vector lengths for OpenAI embedding models. Used to reject
+# an EMBEDDING_DIMENSIONS value that can never match the configured model.
+_EMBEDDING_MODEL_DIMENSIONS = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+}
+
 
 def is_placeholder(value: str | None) -> bool:
     if not value:
         return True
     normalized = value.casefold().strip()
-    return normalized.startswith(("replace-", "change-me", "example", "test-"))
+    # "YOUR_..." template values (for example WHATSAPP_APP_SECRET=YOUR_APP_SECRET)
+    # are the most common copy-paste placeholders and must never satisfy
+    # production configuration validation.
+    return normalized.startswith(("replace-", "change-me", "example", "test-", "your", "placeholder"))
 
 
 def is_weak_secret(value: str | None, minimum_length: int) -> bool:
@@ -69,18 +83,41 @@ class Settings(BaseSettings):
     csrf_cookie_domain: str | None = None
     password_reset_minutes: int = Field(default=30, ge=5, le=1440)
     invitation_expiry_hours: int = Field(default=168, ge=1, le=720)
+    otp_expiry_minutes: int = Field(default=5, ge=1, le=15)
+    otp_resend_seconds: int = Field(default=60, ge=15, le=600)
+    otp_max_attempts: int = Field(default=5, ge=3, le=10)
+    login_lock_minutes: int = Field(default=15, ge=1, le=120)
+    login_max_failures: int = Field(default=5, ge=3, le=20)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from: str | None = None
+    smtp_from_email: str | None = None
+    smtp_from_name: str = "CIET AI Assistant"
 
+    # Primary OpenAI provider. OPENAI_BASE_URL optionally points the OpenAI SDK
+    # at an OpenAI-compatible gateway; it also keeps generation working through
+    # the Chat Completions style if the gateway lacks the Responses API.
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.6-terra"
     openai_mini_model: str = "gpt-5.6-luna"
+    openai_base_url: str | None = None
     embedding_model: str = "text-embedding-3-large"
+    # Length every embedding vector must have so it fits the vector index.
+    # 3072 matches the default text-embedding-3-large model and Pinecone index.
+    embedding_dimensions: int = Field(default=3072, ge=64, le=16384)
     openai_timeout_seconds: float = Field(default=25.0, gt=0, le=120)
     openai_max_retries: int = Field(default=2, ge=0, le=5)
+
+    # Optional alternative providers. Any one configured key keeps AI features
+    # running; the chain fails over in LLM_PROVIDER_ORDER when one errors.
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_embedding_model: str = "gemini-embedding-001"
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+    llm_provider_order: list[str] = Field(default_factory=lambda: list(KNOWN_LLM_PROVIDERS))
 
     pinecone_api_key: str | None = None
     pinecone_cloud: str = "aws"
@@ -132,7 +169,12 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
-        "allowed_hosts", "allowed_widget_domains", "trusted_proxy_ips", "cors_origins_extra", mode="before"
+        "allowed_hosts",
+        "allowed_widget_domains",
+        "trusted_proxy_ips",
+        "cors_origins_extra",
+        "llm_provider_order",
+        mode="before",
     )
     @classmethod
     def parse_csv_lists(cls, value):
@@ -144,8 +186,31 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
+    @field_validator("llm_provider_order", mode="after")
+    @classmethod
+    def validate_llm_provider_order(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("LLM_PROVIDER_ORDER must list at least one provider")
+        normalized = [name.casefold().strip() for name in value]
+        unknown = [name for name in normalized if name not in KNOWN_LLM_PROVIDERS]
+        if unknown:
+            raise ValueError(
+                f"LLM_PROVIDER_ORDER contains unknown providers: {', '.join(unknown)} "
+                f"(supported: {', '.join(KNOWN_LLM_PROVIDERS)})"
+            )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("LLM_PROVIDER_ORDER cannot repeat providers")
+        return normalized
+
     @model_validator(mode="after")
     def validate_production_secrets(self):
+        model_default = _EMBEDDING_MODEL_DIMENSIONS.get(self.embedding_model)
+        if model_default is not None and model_default != self.embedding_dimensions:
+            raise ValueError(
+                f"EMBEDDING_DIMENSIONS ({self.embedding_dimensions}) must match the default "
+                f"vector length of EMBEDDING_MODEL {self.embedding_model!r} ({model_default}); "
+                "the application does not shorten OpenAI embedding vectors"
+            )
         if self.environment != "production":
             return self
         errors: list[str] = []
@@ -156,15 +221,23 @@ class Settings(BaseSettings):
             or is_placeholder(self.jwt_secret)
         ):
             errors.append("JWT_SECRET must be a unique high-entropy value of at least 64 characters")
-        if is_weak_secret(self.openai_api_key, 20):
-            errors.append("OPENAI_API_KEY is required in production")
+        llm_keys = {
+            "OPENAI_API_KEY": self.openai_api_key,
+            "GEMINI_API_KEY": self.gemini_api_key,
+            "GROQ_API_KEY": self.groq_api_key,
+        }
+        if all(is_weak_secret(value, 20) for value in llm_keys.values()):
+            errors.append(
+                "At least one LLM provider key is required in production: "
+                "OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY"
+            )
         if not self.clamav_host:
             errors.append("CLAMAV_HOST is required in production when document uploads are enabled")
         smtp_values = {
             "SMTP_HOST": self.smtp_host,
             "SMTP_USERNAME": self.smtp_username,
             "SMTP_PASSWORD": self.smtp_password,
-            "SMTP_FROM": self.smtp_from,
+            "SMTP_FROM_EMAIL": self.smtp_from_email or self.smtp_from,
         }
         missing_smtp = [name for name, value in smtp_values.items() if is_placeholder(value)]
         if missing_smtp:
@@ -211,6 +284,14 @@ class Settings(BaseSettings):
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+    @property
+    def llm_configured(self) -> bool:
+        """True when at least one usable generation provider key is present."""
+        return any(
+            not is_placeholder(key)
+            for key in (self.openai_api_key, self.gemini_api_key, self.groq_api_key)
+        )
 
     @property
     def docs_enabled(self) -> bool:

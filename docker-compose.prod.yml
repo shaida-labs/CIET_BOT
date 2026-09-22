@@ -1,0 +1,57 @@
+# Production overlay — always used TOGETHER with docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What it changes for a real deployment:
+#   1. Adds ClamAV, the virus scanner. ENVIRONMENT=production refuses to start
+#      unless CLAMAV_HOST is set, and document uploads are scanned through it.
+#      (CLAMAV_HOST/CLAMAV_PORT are injected into api and worker below; the
+#      base .env does not need to define them.)
+#   2. Un-publishes PostgreSQL and Redis from the host machine entirely, and
+#      binds the API and web ports to 127.0.0.1 only. The public site is then
+#      reachable exclusively through the host HTTPS proxy (Caddy/nginx) on
+#      ports 80/443 — the database and raw API are never exposed to the
+#      internet. See DEPLOYMENT_AND_INTEGRATION.md for the proxy setup.
+#
+# The base docker-compose.yml stays a local/development manifest; never edit it
+# for production, and never deploy it unchanged.
+
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  api:
+    ports: !override ["127.0.0.1:8000:8000"]
+    environment:
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+
+  worker:
+    environment:
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+
+  web:
+    ports: !override ["127.0.0.1:8080:8080"]
+
+  clamav:
+    image: clamav/clamav:stable-debian13-slim
+    restart: unless-stopped
+    volumes:
+      # Keeps the virus signature database across container recreation;
+      # without it every restart re-downloads ~300 MB of signatures.
+      - clamav_data:/var/lib/clamav
+    # The signature database downloads on first start, so give clamd a long
+    # grace period before nginx-style health reporting begins.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3310'"]
+      interval: 30s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+
+volumes:
+  clamav_data:

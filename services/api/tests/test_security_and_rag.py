@@ -3,23 +3,35 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
+import jwt
 import pytest
 from fastapi import HTTPException, UploadFile
-import jwt
+from openai import AuthenticationError, BadRequestError
 from starlette.datastructures import Headers
 from starlette.responses import Response
+
 from app.api.routes.auth import set_auth_cookies
-
 from app.core.config import API_ROOT, PROJECT_ROOT, Settings, discover_project_root
-from app.core.security import create_access_token, hash_one_time_token, hash_password, new_one_time_token, validate_password, verify_password
+from app.core.security import (
+    ROLE_PERMISSIONS,
+    Permission,
+    create_access_token,
+    hash_one_time_token,
+    hash_password,
+    new_one_time_token,
+    new_otp_code,
+    validate_password,
+    verify_password,
+)
 from app.models import Document, DocumentChunk, Metric
-from app.services.retrieval import RetrievalService
 from app.services.language import detect_language
+from app.services.llm import LLMService, LLMUnavailableError
 from app.services.pinecone_service import SearchHit, citations_from_hits, keyword_score, rerank_hits
-from app.services.upload_security import validate_upload
+from app.services.retrieval import RetrievalService
 from app.services.storage import StorageService
+from app.services.upload_security import validate_upload
 from app.services.website_search import OfficialWebsiteSearch
-
 
 PRODUCTION_SETTINGS = {
     "environment": "production",
@@ -99,6 +111,310 @@ def test_production_rejects_short_external_credentials():
         Settings(**{**PRODUCTION_SETTINGS, "openai_api_key": "short"})
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error_name"),
+    [
+        ("whatsapp_app_secret", "YOUR_META_APP_SECRET_HERE", "WHATSAPP_APP_SECRET"),
+        ("whatsapp_access_token", "YOUR_META_SYSTEM_USER_TOKEN_HERE", "WHATSAPP_ACCESS_TOKEN"),
+        ("whatsapp_phone_number_id", "YOUR_PHONE_NUMBER_ID_HERE", "WHATSAPP_PHONE_NUMBER_ID"),
+        ("whatsapp_verify_token", "YOUR_WEBHOOK_VERIFY_TOKEN_HERE", "WHATSAPP_VERIFY_TOKEN"),
+    ],
+)
+def test_production_rejects_copy_paste_your_placeholder_whatsapp_credentials(field, value, error_name):
+    """`YOUR_..._HERE` template values must never satisfy production validation.
+
+    The local ``.env`` ships those values from the template, so a regression here
+    would let a deployment start "green" with a WhatsApp integration that cannot work.
+    """
+    with pytest.raises(ValueError, match=error_name):
+        Settings(**{**PRODUCTION_SETTINGS, field: value})
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gpt-4o", [{}]),
+        ("gpt-4o-mini", [{}]),
+        ("gpt-4.1", [{}]),
+        ("o4-mini", [{"reasoning": {"effort": "low"}}, {}]),
+        ("gpt-5.6-luna", [{"reasoning": {"effort": "low"}, "text": {"verbosity": "low"}}, {}]),
+    ],
+)
+def test_openai_tuning_options_follow_the_configured_model_family(model, expected):
+    """`reasoning.effort` on gpt-4o is a hard 400, so options must be model-aware."""
+    assert LLMService.tuning_candidates(model) == expected
+
+
+class _FakeResponses:
+    """Minimal stand-in for the OpenAI Responses API that records each request."""
+
+    def __init__(self, reject_tuning: bool = False):
+        self.reject_tuning = reject_tuning
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.reject_tuning and ("reasoning" in kwargs or "text" in kwargs):
+            raise BadRequestError(
+                "Error code: 400 - unsupported_parameter",
+                response=httpx.Response(400, request=httpx.Request("POST", "https://api.openai.com/v1/responses")),
+                body={"error": {"code": "unsupported_parameter"}},
+            )
+
+        class _Output:
+            output_text = "Admissions information is available from the official website."
+
+        return _Output()
+
+
+def _llm_with_fake_client(model: str, reject_tuning: bool = False) -> tuple[LLMService, _FakeResponses]:
+    settings = Settings(openai_api_key="unit-test-openai-key-0123456789", openai_model=model)
+    service = LLMService(settings)
+    LLMService._clients.pop(
+        ("openai", settings.openai_api_key, settings.openai_timeout_seconds, settings.openai_max_retries, ""),
+        None,
+    )
+    fake = _FakeResponses(reject_tuning=reject_tuning)
+    service.client = type("_FakeClient", (), {"responses": fake})()
+    return service, fake
+
+
+@pytest.mark.anyio
+async def test_generate_omits_unsupported_tuning_options_for_non_reasoning_models():
+    service, fake = _llm_with_fake_client(model="gpt-4o")
+    answer = await service.generate(
+        query="How do I apply?",
+        context="Apply through the official website.",
+        citations=[],
+        language="en",
+    )
+    assert answer
+    assert len(fake.calls) == 1
+    assert "reasoning" not in fake.calls[0]
+    assert "text" not in fake.calls[0]
+    assert fake.calls[0]["model"] == "gpt-4o"
+
+
+@pytest.mark.anyio
+async def test_generate_retries_without_tuning_when_the_api_rejects_it():
+    service, fake = _llm_with_fake_client(model="gpt-5.6-terra", reject_tuning=True)
+    answer = await service.generate(
+        query="How do I apply?",
+        context="Apply through the official website.",
+        citations=[],
+        language="en",
+    )
+    assert answer
+    assert len(fake.calls) == 2
+    assert "reasoning" in fake.calls[0]
+    assert "reasoning" not in fake.calls[1]
+    assert "text" not in fake.calls[1]
+
+
+OPENAI_FIXTURE_KEY = "sk-unit-test-openai-key-0123456789"
+GEMINI_FIXTURE_KEY = "ai-unit-test-gemini-key-0123456789"
+GROQ_FIXTURE_KEY = "gsk-unit-test-groq-key-0123456789"
+
+
+def _auth_error() -> AuthenticationError:
+    return AuthenticationError(
+        "incorrect api key provided",
+        response=httpx.Response(401, request=httpx.Request("POST", "https://api.openai.com/v1/responses")),
+        body={"error": {"message": "incorrect api key"}},
+    )
+
+
+def _fake_chat_client(reply: str = "Apply through the official website."):
+    class _Completions:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=reply))])
+
+    completions = _Completions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return client, completions
+
+
+def _failing_chat_client(error: Exception):
+    class _Completions:
+        async def create(self, **kwargs):
+            raise error
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+
+
+def _fake_embeddings_client(vector: list[float]):
+    class _Embeddings:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(data=[SimpleNamespace(embedding=vector) for _ in kwargs["input"]])
+
+    embeddings = _Embeddings()
+    return SimpleNamespace(embeddings=embeddings), embeddings
+
+
+def _failing_responses_client(error: Exception):
+    class _Responses:
+        async def create(self, **kwargs):
+            raise error
+
+    return SimpleNamespace(responses=_Responses())
+
+
+def test_provider_chain_honours_order_skips_placeholders_and_appends_missing_providers():
+    placeholder_first = Settings(
+        openai_api_key=OPENAI_FIXTURE_KEY,
+        gemini_api_key="YOUR_GEMINI_API_KEY_HERE",
+        groq_api_key=GROQ_FIXTURE_KEY,
+        llm_provider_order="groq, openai",
+    )
+    assert [p.name for p in LLMService.build_chain(placeholder_first)] == ["groq", "openai"]
+
+    subset_order = Settings(
+        openai_api_key=OPENAI_FIXTURE_KEY,
+        gemini_api_key=GEMINI_FIXTURE_KEY,
+        groq_api_key=GROQ_FIXTURE_KEY,
+        llm_provider_order="gemini",
+    )
+    assert [p.name for p in LLMService.build_chain(subset_order)] == ["gemini", "openai", "groq"]
+
+
+def test_provider_chain_is_empty_when_every_key_is_missing_or_placeholder():
+    settings = Settings(
+        openai_api_key=None,
+        gemini_api_key="YOUR_GEMINI_API_KEY_HERE",
+        groq_api_key=None,
+    )
+    assert LLMService.build_chain(settings) == []
+
+
+def test_llm_provider_order_rejects_unknown_and_duplicate_providers():
+    with pytest.raises(ValueError, match="LLM_PROVIDER_ORDER"):
+        Settings(llm_provider_order="openai,cohere")
+    with pytest.raises(ValueError, match="LLM_PROVIDER_ORDER"):
+        Settings(llm_provider_order="openai,openai")
+    with pytest.raises(ValueError, match="LLM_PROVIDER_ORDER"):
+        Settings(llm_provider_order="")
+
+
+@pytest.mark.anyio
+async def test_generation_falls_back_to_the_next_provider_when_one_key_fails():
+    settings = Settings(
+        openai_api_key=OPENAI_FIXTURE_KEY,
+        gemini_api_key=GEMINI_FIXTURE_KEY,
+        llm_provider_order="openai,gemini",
+    )
+    service = LLMService(settings)
+    service._client_overrides["openai"] = _failing_responses_client(_auth_error())
+    gemini_client, gemini_calls = _fake_chat_client(reply="Apply through the official website.")
+    service._client_overrides["gemini"] = gemini_client
+
+    answer = await service.generate(
+        query="How do I apply?",
+        context="Apply through the official website.",
+        citations=[],
+        language="en",
+    )
+    assert answer == "Apply through the official website."
+    assert len(gemini_calls.calls) == 1
+    assert gemini_calls.calls[0]["model"] == "gemini-3.6-flash"
+
+
+@pytest.mark.anyio
+async def test_generation_reports_the_last_category_when_every_provider_fails():
+    settings = Settings(
+        openai_api_key=OPENAI_FIXTURE_KEY,
+        gemini_api_key=GEMINI_FIXTURE_KEY,
+        llm_provider_order="openai,gemini",
+    )
+    service = LLMService(settings)
+    service._client_overrides["openai"] = _failing_responses_client(_auth_error())
+    service._client_overrides["gemini"] = _failing_chat_client(_auth_error())
+
+    with pytest.raises(LLMUnavailableError) as exc:
+        await service.generate(
+            query="How do I apply?",
+            context="Apply through the official website.",
+            citations=[],
+            language="en",
+        )
+    assert exc.value.category == "authentication"
+
+
+@pytest.mark.anyio
+async def test_no_provider_key_fails_closed_without_network_calls():
+    service = LLMService(Settings(openai_api_key=None, gemini_api_key=None, groq_api_key=None))
+    with pytest.raises(LLMUnavailableError) as exc:
+        await service.generate(query="How do I apply?", context="Context.", citations=[], language="en")
+    assert exc.value.category == "not_configured"
+    with pytest.raises(LLMUnavailableError) as exc:
+        await service.embed(["When do admissions open?"])
+    assert exc.value.category == "not_configured"
+
+
+@pytest.mark.anyio
+async def test_embed_uses_the_embedding_chain_and_pins_the_configured_dimensions():
+    settings = Settings(openai_api_key=OPENAI_FIXTURE_KEY, gemini_api_key=GEMINI_FIXTURE_KEY, groq_api_key=GROQ_FIXTURE_KEY)
+    service = LLMService(settings)
+    # Groq exposes no embeddings endpoint and must never join the embed chain.
+    assert [p.name for p in service._embedding_providers()] == ["openai", "gemini"]
+
+    openai_client, openai_calls = _fake_embeddings_client([0.0] * 1536)  # wrong length → rejected
+    gemini_client, gemini_calls = _fake_embeddings_client([0.1] * 3072)
+    service._client_overrides["openai"] = openai_client
+    service._client_overrides["gemini"] = gemini_client
+
+    vectors = await service.embed(["When do admissions open?"])
+    assert vectors == [[0.1] * 3072]
+    assert "dimensions" not in openai_calls.calls[0]
+    assert gemini_calls.calls[0]["dimensions"] == 3072
+
+
+@pytest.mark.anyio
+async def test_embed_fails_closed_when_every_provider_returns_wrong_dimensions():
+    settings = Settings(openai_api_key=OPENAI_FIXTURE_KEY, gemini_api_key=GEMINI_FIXTURE_KEY)
+    service = LLMService(settings)
+    wrong_a, _ = _fake_embeddings_client([0.0] * 1536)
+    wrong_b, _ = _fake_embeddings_client([0.0] * 768)
+    service._client_overrides["openai"] = wrong_a
+    service._client_overrides["gemini"] = wrong_b
+
+    with pytest.raises(LLMUnavailableError) as exc:
+        await service.embed(["When do admissions open?"])
+    assert exc.value.category == "dimension_mismatch"
+
+
+def test_embedding_dimensions_must_match_the_configured_model():
+    with pytest.raises(ValueError, match="EMBEDDING_DIMENSIONS"):
+        Settings(embedding_model="text-embedding-3-small")
+    settings = Settings(embedding_model="text-embedding-3-small", embedding_dimensions=1536)
+    assert settings.embedding_dimensions == 1536
+
+
+def test_production_accepts_any_single_llm_provider_key():
+    base = {**PRODUCTION_SETTINGS, "openai_api_key": None}
+    assert Settings(**{**base, "gemini_api_key": "gemini-fixture-key-0123456789"})
+    assert Settings(**{**base, "groq_api_key": "gsk-fixture-groq-key-0123456789"})
+
+
+def test_production_rejects_placeholder_alternative_llm_keys():
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        Settings(
+            **{
+                **PRODUCTION_SETTINGS,
+                "openai_api_key": None,
+                "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+                "groq_api_key": None,
+            }
+        )
+
+
 def test_production_requires_openai_and_hides_operational_endpoints():
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         Settings(environment="production", jwt_secret="x" * 64)
@@ -123,6 +439,14 @@ def test_one_time_tokens_are_unpredictable_and_hashed_before_storage():
     validate_password("Strong-password-2026")
     with pytest.raises(ValueError, match="12 characters"):
         validate_password("password123")
+
+
+def test_otp_codes_are_six_digit_values_and_permissions_are_explicit():
+    codes = {new_otp_code() for _ in range(20)}
+    assert all(len(code) == 6 and code.isdecimal() for code in codes)
+    assert Permission.manage_faqs in ROLE_PERMISSIONS["content_admin"]
+    assert Permission.manage_metrics not in ROLE_PERMISSIONS["content_admin"]
+    assert Permission.manage_documents not in ROLE_PERMISSIONS["viewer"]
 
 
 def test_auth_cookies_are_httponly_samesite_and_secure_in_production():
@@ -361,35 +685,27 @@ async def test_local_storage_persists_reads_and_deletes(tmp_path):
 
 @pytest.mark.anyio
 async def test_bootstrap_disabled_in_production():
-    from app.api.routes.auth import bootstrap
-    from app.schemas import LoginIn
-    from types import SimpleNamespace
-
-    settings = Settings(**PRODUCTION_SETTINGS)
-    with pytest.raises(HTTPException) as exc:
-        await bootstrap.__wrapped__(
-            LoginIn(username="admin@ciet.edu", password="password123"),
-            SimpleNamespace(client=SimpleNamespace(host="test")),
-            Response(),
-            EmptyScalarSession(),
-            settings,
-        )
-    assert exc.value.status_code == 403
-    assert "only available in local development" in exc.value.detail
+    from app.api.routes import auth
+    assert not hasattr(auth, "bootstrap")
+    route_paths = [route.path for route in auth.router.routes]
+    assert "/bootstrap" not in route_paths
 
 
 @pytest.mark.anyio
 async def test_bootstrap_disabled_in_staging():
-    from app.api.routes.auth import bootstrap
-    from app.schemas import LoginIn
-    from types import SimpleNamespace
-
-    with pytest.raises(HTTPException) as exc:
-        await bootstrap.__wrapped__(
-            LoginIn(username="admin@ciet.edu", password="password123"),
-            SimpleNamespace(client=SimpleNamespace(host="test")),
-            Response(),
-            EmptyScalarSession(),
-            Settings(environment="staging", jwt_secret="x" * 64),
-        )
-    assert exc.value.status_code == 403
+    from app.core.config import get_settings
+    from scripts.reset_admin import main as reset_admin_main
+    get_settings.cache_clear()
+    import os
+    orig_env = os.environ.get("ENVIRONMENT")
+    try:
+        os.environ["ENVIRONMENT"] = "staging"
+        get_settings.cache_clear()
+        with pytest.raises(RuntimeError, match="restricted to ENVIRONMENT=local"):
+            await reset_admin_main("admin@ciet.edu", "Admin")
+    finally:
+        if orig_env is not None:
+            os.environ["ENVIRONMENT"] = orig_env
+        else:
+            os.environ.pop("ENVIRONMENT", None)
+        get_settings.cache_clear()

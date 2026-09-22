@@ -2,9 +2,9 @@ from urllib.parse import urlparse
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.core.responses import UTF8JSONResponse
 
 from app.core.config import Settings
+from app.core.responses import UTF8JSONResponse
 
 
 class DomainSecurityMiddleware(BaseHTTPMiddleware):
@@ -16,6 +16,7 @@ class DomainSecurityMiddleware(BaseHTTPMiddleware):
         if request.url.path in {
             "/api/v1/chat",
             "/api/v1/chat/stream",
+            "/api/v1/chat/translate",
             "/api/v1/feedback",
             "/api/v1/support/tickets",
         }:

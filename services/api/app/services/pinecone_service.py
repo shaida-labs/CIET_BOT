@@ -1,6 +1,7 @@
-from dataclasses import dataclass
 import asyncio
 import unicodedata
+from dataclasses import dataclass
+from typing import ClassVar
 
 import structlog
 from sqlalchemy import or_, select
@@ -12,7 +13,6 @@ from app.models import Document, DocumentChunk
 from app.schemas import Citation
 from app.services.llm import LLMService
 
-
 logger = structlog.get_logger()
 
 
@@ -21,9 +21,9 @@ class PineconeUnavailableError(RuntimeError):
 
 
 EMBEDDING_DIMENSIONS = {
-    # The application does not send OpenAI's optional `dimensions` parameter,
-    # therefore these are the documented default vector lengths for supported
-    # embedding models.
+    # Documented default vector lengths for supported OpenAI embedding models.
+    # The LLM layer additionally rejects any vector whose length differs from
+    # Settings.embedding_dimensions before it reaches the index.
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
@@ -81,7 +81,8 @@ def normalize_tokens(text: str) -> list[str]:
 
 
 class PineconeService:
-    _indexes: dict[tuple[str, str], object] = {}
+    # Shared index handles keyed by settings; intentionally class-level.
+    _indexes: ClassVar[dict[tuple[str, str], object]] = {}
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -118,9 +119,9 @@ class PineconeService:
     def expected_dimension(self) -> int:
         dimension = EMBEDDING_DIMENSIONS.get(self.settings.embedding_model)
         if dimension is None:
-            raise PineconeUnavailableError(
-                f"No default dimension is defined for embedding model {self.settings.embedding_model!r}"
-            )
+            # Alternative models (for example Gemini embeddings) are validated
+            # against the configured vector length in the LLM layer.
+            return self.settings.embedding_dimensions
         return dimension
 
     async def ensure_index_compatible(self) -> None:
@@ -185,10 +186,17 @@ class PineconeService:
             if self.settings.pinecone_api_key:
                 raise PineconeUnavailableError("Configured Pinecone index is unavailable") from self.initialization_error
             return
-        self.index.delete(
-            filter={"document_id": {"$eq": document_id}},
-            namespace=self.settings.pinecone_namespace,
-        )
+        try:
+            self.index.delete(
+                filter={"document_id": {"$eq": document_id}},
+                namespace=self.settings.pinecone_namespace,
+            )
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            message = str(exc).casefold()
+            if status_code == 404 and "namespace" in message and "not found" in message:
+                return
+            raise
 
     async def hybrid_search(
         self,

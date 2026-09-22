@@ -1,7 +1,11 @@
+import asyncio
 import json
 import secrets
 import uuid
+from asyncio import sleep
+from datetime import datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -10,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.rate_limit import limiter
 from app.db.session import get_session
-from app.models import AnalyticsEvent, Channel, Conversation, ConversationMessage, Feedback, HandoffTicket
+from app.models import (
+    AnalyticsEvent,
+    Channel,
+    Conversation,
+    ConversationMessage,
+    Feedback,
+    HandoffTicket,
+)
 from app.schemas import (
     ChatMessageOut,
     ChatRequest,
@@ -18,11 +29,22 @@ from app.schemas import (
     FeedbackIn,
     HandoffTicketIn,
     HandoffTicketOut,
+    TranslateMessageIn,
+    TranslateMessageOut,
+    TranslateRequest,
+    TranslateResponse,
 )
-from app.services.language import detect_language
+from app.services.language import (
+    detect_language,
+    needs_translation,
+    strip_translation_delimiters,
+    translation_accepted,
+)
+from app.services.llm import LLMService, LLMUnavailableError
 from app.services.retrieval import RetrievalService
 
 router = APIRouter(tags=["chat"])
+logger = structlog.get_logger()
 WIDGET_VISITOR_COOKIE = "ciet_widget_visitor"
 
 
@@ -178,6 +200,95 @@ async def chat(
     if created:
         set_widget_visitor_cookie(response, visitor, settings)
     return result
+
+
+async def translate_contents(
+    settings: Settings, language: str, messages: list[TranslateMessageIn]
+) -> list[TranslateMessageOut]:
+    """Translate widget-held history line by line.
+
+    Every line fails closed on its own: text already in the target language
+    or without a working translation is returned unchanged with
+    ``translated=False``, so the client never displays invented text.  Once a
+    provider chain reports total failure the remaining lines skip their own
+    retries instead of repeating the same dead chain.  When that chain died on
+    provider rate limits, one bounded recovery pass runs just inside the next
+    wall-clock minute: free-tier quotas reset there, while the widget itself
+    never re-asks for a switch that came back untranslated.
+    """
+    service = LLMService(settings)
+    semaphore = asyncio.Semaphore(4)
+    exhausted = asyncio.Event()
+    rate_limited = False
+
+    async def translate_one(item: TranslateMessageIn) -> TranslateMessageOut:
+        nonlocal rate_limited
+        if exhausted.is_set() or not needs_translation(item.content, language):
+            return TranslateMessageOut(id=item.id, content=item.content, translated=False)
+        async with semaphore:
+            for attempt in range(2):
+                try:
+                    raw = await service.translate(item.content, language)
+                except LLMUnavailableError as exc:
+                    if exc.category == "rate_limit":
+                        rate_limited = True
+                    exhausted.set()
+                    break
+                candidate = strip_translation_delimiters(raw)
+                if translation_accepted(item.content, candidate, language):
+                    return TranslateMessageOut(id=item.id, content=candidate, translated=True)
+                if attempt == 0:
+                    logger.warning(
+                        "llm_translation_rejected",
+                        language=language,
+                        error_type="wrong_script",
+                    )
+        return TranslateMessageOut(id=item.id, content=item.content, translated=False)
+
+    results = list(await asyncio.gather(*(translate_one(item) for item in messages)))
+    if not rate_limited:
+        return results
+    pending = [
+        index
+        for index, (item, result) in enumerate(zip(messages, results, strict=True))
+        if not result.translated and needs_translation(item.content, language)
+    ]
+    if not pending:
+        return results
+
+    wait_seconds = 60 - datetime.now().second + 1
+    logger.warning(
+        "llm_translation_recovery",
+        pending=len(pending),
+        wait_seconds=wait_seconds,
+    )
+    await sleep(wait_seconds)
+    exhausted.clear()
+    retried = await asyncio.gather(*(translate_one(messages[index]) for index in pending))
+    for index, result in zip(pending, retried, strict=True):
+        results[index] = result
+    return results
+
+
+@router.post("/chat/translate", response_model=TranslateResponse)
+@limiter.limit(lambda: get_settings().chat_rate_limit)
+async def chat_translate(
+    payload: TranslateRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> TranslateResponse:
+    """Re-render an already-delivered conversation in another UI language.
+
+    This endpoint only rewords text the client already received; it never
+    creates new answers, so a provider outage degrades to the original
+    messages instead of blocking the chat.
+    """
+    messages = await translate_contents(settings, payload.language, payload.messages)
+    return TranslateResponse(
+        language=payload.language,
+        translated=any(item.translated for item in messages),
+        messages=messages,
+    )
 
 
 @router.post("/feedback", status_code=204)

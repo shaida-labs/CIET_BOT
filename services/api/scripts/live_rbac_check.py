@@ -42,7 +42,9 @@ async def main() -> None:
                 ("public denied", "/api/v1/admin/faqs", {}, 401),
                 ("admissions FAQ", "/api/v1/admin/faqs", headers[Role.admissions_admin], 200),
                 ("admissions metric denied", "/api/v1/admin/metrics", headers[Role.admissions_admin], 403),
-                ("admissions document denied", "/api/v1/admin/documents", headers[Role.admissions_admin], 403),
+                # ROLE_PERMISSIONS grants admissions_admin manage_documents
+                # (admissions uploads its own brochures), so read access is expected.
+                ("admissions document", "/api/v1/admin/documents", headers[Role.admissions_admin], 200),
                 ("placement metric", "/api/v1/admin/metrics", headers[Role.placement_admin], 200),
                 ("placement FAQ denied", "/api/v1/admin/faqs", headers[Role.placement_admin], 403),
                 ("placement document denied", "/api/v1/admin/documents", headers[Role.placement_admin], 403),

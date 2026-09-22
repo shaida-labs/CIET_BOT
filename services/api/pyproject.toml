@@ -33,12 +33,40 @@ dependencies = [
 dev = [
   "pytest>=8.3.2",
   "pytest-asyncio>=0.24.0",
-  "ruff>=0.6.3"
+  "ruff==0.16.8"
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# The ruleset is declared explicitly on purpose. Without it ruff applies its
+# built-in default selection, which grows between releases and silently turns
+# a passing `ruff check app tests` in CI into a failure.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares dependencies as Depends()/Query() in parameter defaults.
+# That is the framework's intended API, so these calls are treated as
+# immutable defaults rather than as bugs.
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.Header",
+  "fastapi.Form",
+  "fastapi.File",
+  "fastapi.Cookie",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Assertions are the point of tests, and password-shaped test arguments exist
+# to exercise the real password validators.
+"tests/**" = ["S101", "S106"]
+# Documented placeholder defaults that production deployments must override.
+"app/core/config.py" = ["S105"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

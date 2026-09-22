@@ -3,19 +3,19 @@ from contextlib import asynccontextmanager
 import sentry_sdk
 import structlog
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.exceptions import RequestValidationError
 from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from app.core.responses import UTF8JSONResponse
 
 from app.api.routes import admin, auth, chat, health, whatsapp
 from app.core.config import get_settings
 from app.core.domain_security import DomainSecurityMiddleware
 from app.core.rate_limit import limiter
 from app.core.request_limits import RequestSizeLimitMiddleware
+from app.core.responses import UTF8JSONResponse
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.db.session import engine
 from app.services.llm import close_openai_clients

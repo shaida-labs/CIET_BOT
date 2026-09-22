@@ -1,4 +1,8 @@
-from app.services.guardrails import contains_unsafe_numeric_claim, is_sensitive_stat_question, sanitize_answer
+from app.services.guardrails import (
+    contains_unsafe_numeric_claim,
+    is_sensitive_stat_question,
+    sanitize_answer,
+)
 
 
 def test_detects_sensitive_stat_questions():

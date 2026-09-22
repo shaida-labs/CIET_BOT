@@ -1,7 +1,7 @@
+import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-import secrets
-import hashlib
 
 import bcrypt
 import jwt
@@ -23,6 +23,31 @@ class Role(StrEnum):
     admissions_admin = "admissions_admin"
     placement_admin = "placement_admin"
     content_admin = "content_admin"
+
+
+class Permission(StrEnum):
+    view_analytics = "view_analytics"
+    manage_faqs = "manage_faqs"
+    manage_metrics = "manage_metrics"
+    manage_documents = "manage_documents"
+    view_conversations = "view_conversations"
+    manage_admins = "manage_admins"
+    manage_security = "manage_security"
+
+
+ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    Role.super_admin: frozenset(Permission),
+    Role.admin: frozenset(Permission),
+    Role.viewer: frozenset({Permission.view_analytics, Permission.view_conversations}),
+    Role.admissions_admin: frozenset({Permission.view_analytics, Permission.manage_faqs, Permission.manage_documents}),
+    Role.placement_admin: frozenset({Permission.view_analytics, Permission.manage_metrics}),
+    Role.content_admin: frozenset({Permission.view_analytics, Permission.manage_faqs, Permission.manage_documents}),
+    "director": frozenset(Permission),
+    "hod": frozenset({Permission.view_analytics, Permission.manage_faqs, Permission.manage_documents}),
+    "bot_maintenance": frozenset({Permission.view_analytics, Permission.manage_documents, Permission.manage_security}),
+    "content_manager": frozenset({Permission.view_analytics, Permission.manage_faqs, Permission.manage_documents}),
+    "auditor": frozenset({Permission.view_analytics, Permission.view_conversations}),
+}
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
@@ -70,6 +95,10 @@ def new_one_time_token() -> str:
 
 def hash_one_time_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def new_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def create_access_token(
@@ -145,6 +174,16 @@ def require_roles(*roles: Role):
         if user.role == Role.viewer and Role.super_admin not in roles and request.method in {"GET", "HEAD"}:
             return user
         if user.role not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+
+    return guard
+
+
+def require_permissions(*permissions: Permission):
+    async def guard(_: Request, user: AdminUser = Depends(current_user)) -> AdminUser:
+        granted = ROLE_PERMISSIONS.get(user.role, frozenset())
+        if not set(permissions).issubset(granted):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user
 

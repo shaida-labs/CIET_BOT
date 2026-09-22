@@ -13,7 +13,6 @@ const translation = {
     resize: "Resize assistant",
     language: "Language",
     minimize: "Minimize assistant",
-    restore: "Restore assistant",
     close: "Close assistant",
   },
   language: {
@@ -22,15 +21,9 @@ const translation = {
     hi: "हिन्दी",
   },
   welcome: {
+    title: "Welcome to CIET",
     message:
       "Hello.\n\nI am CIET AI Assistant.\n\nI can help you with admissions, placements, departments, scholarships, campus facilities, and official college information.\n\nHow can I help you today?",
-  },
-  trust: "Grounded in verified CIET information",
-  starters: {
-    title: "Popular questions",
-    courses: "What courses are available?",
-    admissions: "How do admissions work?",
-    hostel: "Is hostel available?",
   },
   actions: {
     admissions: {
@@ -90,7 +83,10 @@ const translation = {
     feedback: "Feedback could not be saved. Please try again.",
     previewMount: "CIET AI preview failed to mount. Open the browser console for details.",
   },
-  notices: { feedbackSaved: "Thank you. Your feedback was saved." },
+  notices: {
+    feedbackSaved: "Thank you. Your feedback was saved.",
+    translating: "Translating conversation…",
+  },
   messageActions: {
     copy: "Copy answer",
     copied: "Answer copied",
@@ -98,15 +94,9 @@ const translation = {
     helpful: "Helpful answer",
     unhelpful: "Unhelpful answer",
   },
-  confidence: {
-    verified: "Verified",
-    high: "High",
-    medium: "Medium",
-    low: "Low",
-  },
   footer: {
     clear: "Clear chat",
-    note: "AI answers include confidence and sources",
+    note: "Answers grounded in verified CIET records",
     privacy: "Privacy",
   },
 };

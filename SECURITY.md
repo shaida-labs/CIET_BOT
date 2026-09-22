@@ -31,9 +31,7 @@
 - Rotate WhatsApp and R2 tokens every semester or on personnel changes.
 - Run database backups daily and test restore monthly.
 
-The current release decision is **NOT PRODUCTION READY**. See
-[`docs/security-audit-report.md`](docs/security-audit-report.md) and
-[`docs/ciet-production-readiness-report.md`](docs/ciet-production-readiness-report.md) for open risks.
+
 
 ## Reporting
 

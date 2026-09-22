@@ -1,7 +1,7 @@
 import csv
 import io
-from pathlib import Path
 import re
+from pathlib import Path
 
 import docx
 import openpyxl

@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Widget } from "./Widget";
+import { PreviewPage } from "./PreviewPage";
 import { i18n } from "./i18n";
 import "./fonts.css";
 import "./widget.css";
@@ -10,23 +11,26 @@ const root = document.getElementById("ciet-ai-root");
 // cross-origin request. Deployments keep an explicit VITE_API_URL (or the
 // production default) for the standalone widget.
 const apiUrl = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? "" : "http://localhost:8000");
-const snippet = document.getElementById("ciet-preview-snippet");
-if (snippet) snippet.textContent = `<script src="/ciet-ai.js" data-api-url="${apiUrl}"></script>`;
 
 if (!root) {
   throw new Error("CIET AI preview root was not found.");
 }
 
+// Add body class for preview page styling
+document.body.classList.add("ciet-preview-page");
+
 try {
   createRoot(root).render(
     <React.StrictMode>
-      <Widget
-        config={{
-          apiUrl,
-          tenant: "ciet",
-          position: "bottom-right",
-        }}
-      />
+      <PreviewPage>
+        <Widget
+          config={{
+            apiUrl,
+            tenant: "ciet",
+            position: "bottom-right",
+          }}
+        />
+      </PreviewPage>
     </React.StrictMode>,
   );
 } catch (error) {

@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AdminUser, AuditLog
 
-
 SENSITIVE_METADATA_KEYS = ("password", "secret", "token", "authorization", "api_key", "api-key")
 
 

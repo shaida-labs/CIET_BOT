@@ -3,9 +3,9 @@ from fastapi import HTTPException
 
 from app.core.config import Settings
 from app.core.domain_security import is_allowed_origin
+from app.models import DocumentChunk
 from app.services.language import detect_language
 from app.services.pinecone_service import PineconeService, PineconeUnavailableError
-from app.models import DocumentChunk
 from app.services.upload_security import scan_content
 
 

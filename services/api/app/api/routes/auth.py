@@ -1,4 +1,5 @@
-from datetime import timedelta
+import secrets
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
@@ -15,11 +16,12 @@ from app.core.security import (
     hash_password,
     new_csrf_token,
     new_one_time_token,
+    new_otp_code,
     validate_password,
     verify_password,
 )
 from app.db.session import get_session
-from app.models import AdminInvitation, AdminUser, PasswordResetToken, now
+from app.models import AdminInvitation, AdminOtpChallenge, AdminUser, PasswordResetToken, now
 from app.schemas import (
     AcceptInvitationIn,
     AdminInvitationIn,
@@ -28,6 +30,8 @@ from app.schemas import (
     ForgotPasswordIn,
     GenericMessageOut,
     LoginIn,
+    OtpRequestIn,
+    OtpVerifyIn,
     ResetPasswordIn,
 )
 from app.services.audit import write_audit
@@ -63,46 +67,134 @@ async def login(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> AuthSessionOut:
-    user = await session.scalar(select(AdminUser).where(AdminUser.email == payload.email.strip().lower()))
-    if not user or not verify_password(payload.password, user.password_hash):
+    email = payload.email.strip().lower()
+    user = await session.scalar(select(AdminUser).where(AdminUser.email == email).with_for_update())
+    current_time = now()
+    if (
+        not user
+        or not user.is_active
+        or (user.locked_until and user.locked_until > current_time)
+        or not verify_password(payload.password, user.password_hash)
+    ):
+        if user:
+            user.failed_login_count += 1
+            if user.failed_login_count >= settings.login_max_failures:
+                user.locked_until = current_time + timedelta(minutes=settings.login_lock_minutes)
+            await write_audit(session, action="login_failure", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+            await session.commit()
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account is disabled")
-    await write_audit(session, action="login", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+
+    active_challenges = list(
+        (
+            await session.scalars(
+                select(AdminOtpChallenge).where(
+                    AdminOtpChallenge.admin_user_id == user.id,
+                    AdminOtpChallenge.used_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    for challenge in active_challenges:
+        challenge.used_at = current_time
+
+    challenge_token = new_one_time_token()
+    code = new_otp_code()
+    session.add(
+        AdminOtpChallenge(
+            admin_user_id=user.id,
+            challenge_hash=hash_one_time_token(challenge_token),
+            code_hash=hash_one_time_token(code),
+            expires_at=current_time + timedelta(minutes=settings.otp_expiry_minutes),
+            max_attempts=settings.otp_max_attempts,
+            resend_after=current_time + timedelta(seconds=settings.otp_resend_seconds),
+        )
+    )
+    await write_audit(session, action="otp_requested", entity_type="admin_user", entity_id=user.id, user=user, request=request)
     await session.commit()
-    token = create_access_token(user.id, user.role, settings, session_version=user.session_version)
-    set_auth_cookies(response, token, settings)
-    return AuthSessionOut()
+    try:
+        await NotificationService(settings).send_otp(user.email, code)
+    except NotificationError as exc:
+        raise HTTPException(status_code=503, detail="BLOCKED - EXTERNAL CONFIGURATION REQUIRED") from exc
+    return AuthSessionOut(email=user.email, challenge=challenge_token, otp_required=True)
 
 
-@router.post("/bootstrap", response_model=AuthSessionOut)
+@router.post("/otp/request", response_model=AuthSessionOut)
 @limiter.limit(lambda: get_settings().auth_rate_limit)
-async def bootstrap(
-    payload: LoginIn,
+async def request_otp(
+    payload: OtpRequestIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AuthSessionOut:
+    challenge = await session.scalar(
+        select(AdminOtpChallenge)
+        .where(
+            AdminOtpChallenge.challenge_hash == hash_one_time_token(payload.challenge),
+            AdminOtpChallenge.used_at.is_(None),
+            AdminOtpChallenge.expires_at > now(),
+        )
+        .with_for_update()
+    )
+    if not challenge or challenge.resend_after > now():
+        raise HTTPException(status_code=429, detail="A verification code cannot be resent yet")
+    user = await session.get(AdminUser, challenge.admin_user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="Verification challenge is invalid or expired")
+    code = new_otp_code()
+    challenge.code_hash = hash_one_time_token(code)
+    challenge.attempts = 0
+    challenge.expires_at = now() + timedelta(minutes=settings.otp_expiry_minutes)
+    challenge.resend_after = now() + timedelta(seconds=settings.otp_resend_seconds)
+    await write_audit(session, action="otp_requested", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+    await session.commit()
+    try:
+        await NotificationService(settings).send_otp(user.email, code)
+    except NotificationError as exc:
+        raise HTTPException(status_code=503, detail="BLOCKED - EXTERNAL CONFIGURATION REQUIRED") from exc
+    return AuthSessionOut(email=user.email, challenge=payload.challenge, otp_required=True)
+
+
+@router.post("/otp/verify", response_model=AuthSessionOut)
+@limiter.limit(lambda: get_settings().auth_rate_limit)
+async def verify_otp(
+    payload: OtpVerifyIn,
     request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> AuthSessionOut:
-    if settings.environment != "local":
-        raise HTTPException(status_code=403, detail="Bootstrap is only available in local development")
-    existing = await session.scalar(select(AdminUser))
-    if existing:
-        raise HTTPException(status_code=409, detail="Admin already exists")
-    try:
-        validate_password(payload.password)
-        password_hash = hash_password(payload.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    user = AdminUser(email=payload.email.lower(), password_hash=password_hash, role="super_admin")
-    session.add(user)
-    await session.flush()
-    await write_audit(session, action="bootstrap", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+    challenge = await session.scalar(
+        select(AdminOtpChallenge)
+        .where(
+            AdminOtpChallenge.challenge_hash == hash_one_time_token(payload.challenge),
+            AdminOtpChallenge.used_at.is_(None),
+            AdminOtpChallenge.expires_at > now(),
+        )
+        .with_for_update()
+    )
+    if not challenge:
+        raise HTTPException(status_code=400, detail="Verification code is invalid or expired")
+    user = await session.get(AdminUser, challenge.admin_user_id, with_for_update=True)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="Verification code is invalid or expired")
+    if not secrets.compare_digest(challenge.code_hash, hash_one_time_token(payload.code)):
+        challenge.attempts += 1
+        if challenge.attempts >= challenge.max_attempts:
+            challenge.used_at = now()
+        await write_audit(session, action="otp_verification_failure", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+        await session.commit()
+        raise HTTPException(status_code=401, detail="Verification code is invalid")
+
+    challenge.used_at = now()
+    user.failed_login_count = 0
+    user.locked_until = None
+    user.last_login_at = datetime.now(UTC)
+    await write_audit(session, action="otp_verification_success", entity_type="admin_user", entity_id=user.id, user=user, request=request)
+    await write_audit(session, action="login_success", entity_type="admin_user", entity_id=user.id, user=user, request=request)
     await session.commit()
-    await session.refresh(user)
     token = create_access_token(user.id, user.role, settings, session_version=user.session_version)
     set_auth_cookies(response, token, settings)
-    return AuthSessionOut()
+    return AuthSessionOut(email=user.email, role=user.role)
 
 
 @router.post("/logout", status_code=204)
@@ -232,6 +324,7 @@ async def create_invitation(
         raise HTTPException(status_code=409, detail="An administrator with this email already exists")
     token = new_one_time_token()
     invitation = AdminInvitation(
+        name=payload.name,
         email=email,
         role=payload.role,
         invited_by_id=user.id,
@@ -274,7 +367,7 @@ async def accept_invitation(
         raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
     if await session.scalar(select(AdminUser.id).where(AdminUser.email == invitation.email)):
         raise HTTPException(status_code=409, detail="An administrator with this email already exists")
-    new_user = AdminUser(email=invitation.email, password_hash=password_hash, role=invitation.role, is_active=True)
+    new_user = AdminUser(email=invitation.email, name=payload.name or invitation.name, password_hash=password_hash, role=invitation.role, is_active=True)
     session.add(new_user)
     await session.flush()
     invitation.accepted_at = now()

@@ -15,4 +15,9 @@ htmlcov/
 vite.config.js
 vite.config.d.ts
 .DS_Store
-services/api/storage/mail-outbox/
+# Runtime data: uploaded documents and the local mail outbox are generated,
+# never source. The mail outbox can contain live OTP/reset emails in local
+# development and must never be committed.
+services/api/storage/
+qa_evidence/
+screenshots/

@@ -1,5 +1,5 @@
-from io import BytesIO
 import json
+from io import BytesIO
 from tempfile import SpooledTemporaryFile
 
 import jwt
@@ -47,13 +47,13 @@ class UserSession:
 
 @pytest.mark.anyio
 async def test_upload_read_stops_at_configured_limit():
-    file_object = SpooledTemporaryFile()
-    file_object.write(b"123456")
-    file_object.seek(0)
-    upload = UploadFile(file=file_object, filename="notice.txt")
-    with pytest.raises(HTTPException) as exc:
-        await read_upload_limited(upload, 5)
-    assert exc.value.status_code == 413
+    with SpooledTemporaryFile() as file_object:
+        file_object.write(b"123456")
+        file_object.seek(0)
+        upload = UploadFile(file=file_object, filename="notice.txt")
+        with pytest.raises(HTTPException) as exc:
+            await read_upload_limited(upload, 5)
+        assert exc.value.status_code == 413
 
 
 @pytest.mark.anyio

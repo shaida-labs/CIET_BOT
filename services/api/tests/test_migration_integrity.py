@@ -3,7 +3,14 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from app.models import AdminInvitation, AdminUser, HandoffTicket, IngestionJob, PasswordResetToken
+from app.models import (
+    AdminInvitation,
+    AdminOtpChallenge,
+    AdminUser,
+    HandoffTicket,
+    IngestionJob,
+    PasswordResetToken,
+)
 
 
 def test_migration_history_has_a_single_head_and_required_revisions() -> None:
@@ -12,7 +19,7 @@ def test_migration_history_has_a_single_head_and_required_revisions() -> None:
     config.set_main_option("script_location", str(api_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0006_handoff_tickets"]
+    assert script.get_heads() == ["0008_invitation_identity"]
     revisions = {revision.revision for revision in script.walk_revisions()}
     assert {
         "0001_initial",
@@ -21,11 +28,15 @@ def test_migration_history_has_a_single_head_and_required_revisions() -> None:
         "0004_session_job_integrity",
         "0005_admin_account_recovery",
         "0006_handoff_tickets",
+        "0007_secure_admin_otp",
+        "0008_invitation_identity",
     } <= revisions
 
 
 def test_model_schema_invariants_are_declared() -> None:
     assert "session_version" in AdminUser.__table__.c
+    assert "mfa_enabled" in AdminUser.__table__.c
+    assert AdminOtpChallenge.__table__.c.challenge_hash.unique
     assert any(constraint.name == "uq_ingestion_jobs_document_id" for constraint in IngestionJob.__table__.constraints)
     assert PasswordResetToken.__table__.c.token_hash.unique
     assert AdminInvitation.__table__.c.token_hash.unique

@@ -1,8 +1,0 @@
-CIET black-box QA verification document.
-
-For this controlled test only, the CIET RAG verification code is CYGNUS-7429.
-The controlled QA shuttle departure time is 07:42.
-The QA scholarship reference is MERIT-2026-ALPHA.
-
-These values exist solely to verify document ingestion, grounded answers, citations,
-confidence reporting, and resistance to hallucination during this deployment test.

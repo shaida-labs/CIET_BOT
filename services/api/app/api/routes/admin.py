@@ -1,15 +1,17 @@
-import uuid
 import asyncio
+import uuid
 from collections import Counter
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, Request, UploadFile
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.security import Role, current_user, require_roles
+from app.core.security import Permission, Role, current_user, require_permissions, require_roles
 from app.db.session import get_session
 from app.models import (
+    FAQ,
     AdminUser,
     AllowedDomain,
     AnalyticsEvent,
@@ -18,7 +20,6 @@ from app.models import (
     ConversationMessage,
     Document,
     DocumentChunk,
-    FAQ,
     Feedback,
     HandoffTicket,
     IngestionJob,
@@ -26,6 +27,7 @@ from app.models import (
     now,
 )
 from app.schemas import (
+    UUID_PATTERN,
     AnalyticsSummary,
     AuditLogOut,
     DocumentOut,
@@ -56,9 +58,9 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(curren
 # are implicitly accepted by require_roles. Keep these dependencies explicit so a
 # general content editor cannot change verified placement metrics or operational
 # security settings.
-faq_admin = require_roles(Role.content_admin, Role.admissions_admin)
-metric_admin = require_roles(Role.placement_admin)
-document_admin = require_roles(Role.content_admin)
+faq_admin = require_permissions(Permission.manage_faqs)
+metric_admin = require_permissions(Permission.manage_metrics)
+document_admin = require_permissions(Permission.manage_documents)
 super_admin = require_roles(Role.super_admin)
 
 
@@ -109,7 +111,7 @@ async def create_faq(
 
 @router.put("/faqs/{faq_id}", response_model=FAQOut)
 async def update_faq(
-    faq_id: str,
+    faq_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     payload: FAQIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
@@ -129,7 +131,7 @@ async def update_faq(
 
 @router.delete("/faqs/{faq_id}", status_code=204)
 async def delete_faq(
-    faq_id: str,
+    faq_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: AdminUser = Depends(faq_admin),
@@ -190,7 +192,7 @@ async def create_metric(
 
 @router.put("/metrics/{metric_id}", response_model=MetricOut)
 async def update_metric(
-    metric_id: str,
+    metric_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     payload: MetricIn,
     request: Request,
     session: AsyncSession = Depends(get_session),
@@ -210,7 +212,7 @@ async def update_metric(
 
 @router.delete("/metrics/{metric_id}", status_code=204)
 async def delete_metric(
-    metric_id: str,
+    metric_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: AdminUser = Depends(metric_admin),
@@ -302,7 +304,10 @@ async def upload_document(
     response_model=JobOut,
     dependencies=[Depends(document_admin)],
 )
-async def document_job(document_id: str, session: AsyncSession = Depends(get_session)) -> IngestionJob:
+async def document_job(
+    document_id: Annotated[str, Path(pattern=UUID_PATTERN)],
+    session: AsyncSession = Depends(get_session),
+) -> IngestionJob:
     job = await session.scalar(select(IngestionJob).where(IngestionJob.document_id == document_id))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -311,7 +316,7 @@ async def document_job(document_id: str, session: AsyncSession = Depends(get_ses
 
 @router.post("/documents/{document_id}/reprocess", response_model=JobOut)
 async def reprocess_document(
-    document_id: str,
+    document_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     request: Request,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -337,7 +342,7 @@ async def reprocess_document(
 
 @router.delete("/documents/{document_id}", status_code=204)
 async def delete_document(
-    document_id: str,
+    document_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     request: Request,
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -502,7 +507,7 @@ async def handoff_tickets(session: AsyncSession = Depends(get_session)) -> list[
 
 @router.patch("/handoff-tickets/{ticket_id}", response_model=HandoffTicketOut)
 async def update_handoff_ticket(
-    ticket_id: str,
+    ticket_id: Annotated[str, Path(pattern=UUID_PATTERN)],
     payload: HandoffTicketUpdateIn,
     request: Request,
     session: AsyncSession = Depends(get_session),

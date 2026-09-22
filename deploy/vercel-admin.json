@@ -1,6 +1,0 @@
-{
-  "buildCommand": "npm run build -w @ciet/admin",
-  "outputDirectory": "apps/admin/dist",
-  "installCommand": "npm ci",
-  "framework": "vite"
-}

@@ -1,0 +1,19 @@
+# Test-environment overlay for the live browser end-to-end suite.
+#
+# The E2E administrator uses a non-routable test address, so a real SMTP relay
+# would reject (or never make readable) its OTP email. Running the stack with
+# this overlay sets SMTP_HOST="" which, in ENVIRONMENT=local only, routes the
+# real OTP email bytes to services/api/storage/mail-outbox/ inside the api
+# volume, where e2e/live-readiness.mjs reads them.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+#
+# Never use this overlay in staging or production: outside ENVIRONMENT=local
+# the API fails closed when SMTP is not configured.
+services:
+  api:
+    environment:
+      SMTP_HOST: ""
+  worker:
+    environment:
+      SMTP_HOST: ""

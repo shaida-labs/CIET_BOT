@@ -7,12 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.models import FAQ, Metric
 from app.schemas import Citation, RetrievalResult
-from app.services.guardrails import SAFE_STAT_RESPONSES, is_sensitive_stat_question
 from app.services.cache import cache_answer, get_cached_answer
+from app.services.guardrails import SAFE_STAT_RESPONSES, is_sensitive_stat_question
 from app.services.llm import LLMService, LLMUnavailableError
-from app.services.pinecone_service import PineconeService, citations_from_hits, keyword_score, normalize_tokens
+from app.services.pinecone_service import (
+    PineconeService,
+    citations_from_hits,
+    keyword_score,
+    normalize_tokens,
+)
 from app.services.website_search import OfficialWebsiteSearch
-
 
 LOCALIZED_FALLBACKS = {
     "en": "I could not find sufficiently relevant, verified CIET information for this question. Please contact the appropriate CIET office for an official answer.",

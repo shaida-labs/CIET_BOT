@@ -18,12 +18,15 @@
     "test:e2e": "node e2e/readiness.mjs",
     "test:e2e:widget-i18n": "node e2e/widget-i18n.mjs",
     "test:e2e:live": "node e2e/live-readiness.mjs",
+    "test:e2e:ui": "node e2e/ui-smoke.mjs",
     "test:a11y:live": "node e2e/accessibility.mjs",
     "api:dev": "cd services/api && uvicorn app.main:app --reload --port 8000",
     "api:test": "cd services/api && pytest"
   },
   "devDependencies": {
     "@axe-core/puppeteer": "^4.13.0",
-    "puppeteer": "^25.3.0"
+    "@playwright/test": "^1.63.0",
+    "playwright": "^1.63.0",
+    "puppeteer": "^25.11.0"
   }
 }

@@ -14,11 +14,9 @@ import {
   Languages,
   MapPin,
   Maximize2,
-  MessageCircle,
   Minus,
   RefreshCw,
   RotateCcw,
-  ShieldCheck,
   Sparkles,
   ThumbsDown,
   ThumbsUp,
@@ -27,8 +25,11 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import ReactMarkdown from "react-markdown";
 import { useTranslation } from "react-i18next";
-import { ApiError, sendFeedback, sendMessage } from "./api";
+import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
+import { ApiError, sendFeedback, sendMessage, translateHistory } from "./api";
 import "./i18n";
 import { initialLanguage, persistLanguage } from "./i18n";
 import { clearSession, loadSession, saveSession } from "./storage";
@@ -46,9 +47,9 @@ const actions = [
   ["contact", MapPin],
 ] as const;
 
-const starterKeys = ["courses", "admissions", "hostel"] as const;
 type NoticeKey = "feedbackSaved";
 const languageOptions: Language[] = ["en", "te", "hi"];
+const defaultLogoUrl = `${import.meta.env.BASE_URL}ciet-logo.jpg`;
 
 function createWelcome(content: string, language: Language): ChatMessage {
   return {
@@ -146,7 +147,6 @@ export function Widget({ config }: { config: WidgetConfig }) {
   const widgetPosition = config.position;
   const saved = useMemo(loadSession, []);
   const [open, setOpen] = useState(false);
-  const [minimized, setMinimized] = useState(false);
   const [language, setLanguage] = useState<Language>(() => initialLanguage());
   const [messages, setMessages] = useState<ChatMessage[]>(
     saved.messages.length ? uniqueMessages(saved.messages) : [createWelcome(t("welcome.message"), language)],
@@ -158,15 +158,20 @@ export function Widget({ config }: { config: WidgetConfig }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeKey | null>(null);
+  const [translating, setTranslating] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const [size, setSize] = useState({ width: 420, height: 720 });
+  const [size, setSize] = useState({ width: 270, height: 360 });
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
   const resizeRef = useRef<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const bootLanguage = useRef(language);
+  const translateSeq = useRef(0);
 
   useEffect(() => {
-    const openWidget = () => { setOpen(true); setMinimized(false); };
+    const openWidget = () => { setOpen(true); };
     window.addEventListener("ciet-ai:open", openWidget);
     return () => window.removeEventListener("ciet-ai:open", openWidget);
   }, []);
@@ -174,13 +179,36 @@ export function Widget({ config }: { config: WidgetConfig }) {
   useEffect(() => {
     void i18n.changeLanguage(language);
     persistLanguage(language);
-    setMessages((current) => {
-      if (current.length === 1 && current[0]?.id === "welcome") {
-        return [createWelcome(i18n.getFixedT(language)("welcome.message"), language)];
-      }
-      return current;
-    });
-  }, [i18n, language]);
+    const snapshot = messagesRef.current;
+    if (snapshot.length === 1 && snapshot[0]?.id === "welcome") {
+      // The lone welcome line is stored locally, so rebuild it instantly.
+      setMessages([createWelcome(i18n.getFixedT(language)("welcome.message"), language)]);
+      return;
+    }
+    if (language === bootLanguage.current || !snapshot.length) return;
+    // Switching languages must re-render the WHOLE conversation: ask the API
+    // to reword every stored line, then apply results by id so a message that
+    // arrives mid-translation is never shifted or overwritten. A provider
+    // outage leaves the originals untouched (fail-closed).
+    const seq = ++translateSeq.current;
+    setTranslating(true);
+    translateHistory(config, language, snapshot)
+      .then((result) => {
+        if (seq !== translateSeq.current || !result.translated) return;
+        const byId = new Map(result.messages.map((item) => [item.id, item]));
+        setMessages((current) => current.map((item) => {
+          const applied = byId.get(item.id);
+          return applied?.translated ? { ...item, content: applied.content, language } : item;
+        }));
+      })
+      .catch(() => {
+        // Translation is an enhancement: keep the original messages when the
+        // service is unreachable instead of showing a broken conversation.
+      })
+      .finally(() => {
+        if (seq === translateSeq.current) setTranslating(false);
+      });
+  }, [config, i18n, language]);
 
   useEffect(() => {
     saveSession({ conversationId, messages });
@@ -195,15 +223,14 @@ export function Widget({ config }: { config: WidgetConfig }) {
   }, [input]);
 
   useEffect(() => {
-    if (open && !minimized) inputRef.current?.focus();
-  }, [open, minimized]);
+    if (open) inputRef.current?.focus();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setOpen(false);
-      setMinimized(false);
       window.requestAnimationFrame(() => launcherRef.current?.focus());
     };
     window.addEventListener("keydown", closeOnEscape);
@@ -212,7 +239,6 @@ export function Widget({ config }: { config: WidgetConfig }) {
 
   const closeWidget = () => {
     setOpen(false);
-    setMinimized(false);
     window.requestAnimationFrame(() => launcherRef.current?.focus());
   };
 
@@ -222,10 +248,10 @@ export function Widget({ config }: { config: WidgetConfig }) {
       const deltaX = resizeRef.current.x - event.clientX;
       const deltaY = resizeRef.current.y - event.clientY;
       setSize({
-        width: Math.min(620, Math.max(360, resizeRef.current.width + deltaX)),
+        width: Math.min(320, Math.max(220, resizeRef.current.width + deltaX)),
         height: Math.min(
           window.innerHeight - 40,
-          Math.max(560, resizeRef.current.height + deltaY),
+          Math.max(300, resizeRef.current.height + deltaY),
         ),
       });
     };
@@ -334,19 +360,18 @@ export function Widget({ config }: { config: WidgetConfig }) {
 
         {open && (
           <section
-            className={`ciet-panel ${minimized ? "ciet-panel--minimized" : ""}`}
+            className="ciet-panel"
             style={
               {
                 "--ciet-width": `${size.width}px`,
                 "--ciet-height": `${size.height}px`,
-                "--ciet-primary": config.primaryColor ?? "#174f43",
+                "--ciet-primary": config.primaryColor ?? "#0b5cad",
               } as CSSProperties
             }
             role="dialog"
             aria-modal="false"
             aria-label={t("header.dialog")}
           >
-            {!minimized && (
               <button
                 className="ciet-resizer"
                 aria-label={t("header.resize")}
@@ -361,25 +386,21 @@ export function Widget({ config }: { config: WidgetConfig }) {
               >
                 <Maximize2 size={12} />
               </button>
-            )}
             <header className="ciet-header">
               <div className="ciet-identity">
-                {config.logoUrl ? (
-                  <img src={config.logoUrl} alt={t("brand.logoAlt")} />
-                ) : (
-                  <span className="ciet-bot-mark"><AiRobot /></span>
-                )}
-                <div>
-                  <strong>{t("brand.title")}</strong>
-                  <small><i /> {t("brand.subtitle")}</small>
+                <img className="ciet-logo" src={config.logoUrl || defaultLogoUrl} alt={t("brand.logoAlt")} />
+                <div className="ciet-identity-text">
+                  <div className="ciet-identity-title">{t("brand.title")}</div>
+                  <div className="ciet-identity-subtitle">
+                    <span className="ciet-status-dot" />
+                    {t("brand.subtitle")}
+                  </div>
                 </div>
               </div>
               <div className="ciet-header-actions">
-                {!minimized && (
-                  <LanguageSelector language={language} onChange={setLanguage} />
-                )}
-                <button onClick={() => setMinimized(!minimized)} aria-label={minimized ? t("header.restore") : t("header.minimize")}>
-                  {minimized ? <MessageCircle size={17} /> : <Minus size={18} />}
+                <LanguageSelector language={language} onChange={setLanguage} />
+                <button onClick={closeWidget} aria-label={t("header.minimize")}>
+                  <Minus size={18} />
                 </button>
                 <button onClick={closeWidget} aria-label={t("header.close")}>
                   <X size={18} />
@@ -387,55 +408,41 @@ export function Widget({ config }: { config: WidgetConfig }) {
               </div>
             </header>
 
-            {!minimized && (
-              <>
-                <div className="ciet-trust">
-                  <ShieldCheck size={14} />
-                  <span>{t("trust")}</span>
-                  <i aria-hidden="true" />
-                  <span className="ciet-trust-secondary">{t("brand.subtitle")}</span>
-                </div>
+            <>
                 <div className="ciet-messages" aria-live="polite" aria-label={t("chat.history")} tabIndex={0}>
-                  {messages.map((message, index) => (
-                    <article
-                      key={message.id}
-                      className={`ciet-message-row ciet-message-row--${message.role}`}
-                      lang={displayLanguage(message)}
-                    >
-                      {message.role === "assistant" && <span className="ciet-avatar"><Sparkles size={13} /></span>}
-                      <div className="ciet-message-wrap">
-                        <div className={`ciet-message ciet-message--${message.role}`}>{message.content}</div>
-                        <div className="ciet-message-meta">
-                          <time>{new Date(message.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                          {message.confidence && <span className={`ciet-confidence ciet-confidence--${message.confidence}`}>{t(`confidence.${message.confidence}`)}</span>}
-                        </div>
-                        {message.citations?.length ? (
-                          <div className="ciet-citations">
-                            {message.citations.map((citation, citationIndex) => citation.url ? (
-                              <a href={citation.url} target="_blank" rel="noreferrer" key={`${citation.title}-${citationIndex}`}>
-                                <BookOpen size={12} />
-                                <span>{citation.title}{citation.section ? ` · ${citation.section}` : ""}</span>
-                              </a>
+                  {messages.map((message, index) => {
+                    return (
+                      <article
+                        key={message.id}
+                        className={`ciet-message-row ciet-message-row--${message.role}`}
+                        lang={displayLanguage(message)}
+                      >
+                        {message.role === "assistant" && <span className="ciet-avatar"><Sparkles size={13} /></span>}
+                        <div className="ciet-message-wrap">
+                          <div className={`ciet-message ciet-message--${message.role}`}>
+                            {message.role === "assistant" ? (
+                              <div className="ciet-markdown">
+                                <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+                                  {message.content}
+                                </ReactMarkdown>
+                              </div>
                             ) : (
-                              <span className="ciet-citation" key={`${citation.title}-${citationIndex}`}>
-                                <BookOpen size={12} />
-                                <span>{citation.title}{citation.section ? ` · ${citation.section}` : ""}</span>
-                              </span>
-                            ))}
+                              message.content
+                            )}
                           </div>
-                        ) : null}
-                        {message.role === "assistant" && message.id !== "welcome" && (
-                          <div className="ciet-message-actions">
-                            <button onClick={() => copy(message)} aria-label={copied === message.id ? t("messageActions.copied") : t("messageActions.copy")}>{copied === message.id ? <Check size={13} /> : <Copy size={13} />}</button>
-                            <button onClick={() => submit(messages[index - 1]?.content ?? "", index - 1)} aria-label={t("messageActions.regenerate")}><RefreshCw size={13} /></button>
-                            <span />
-                            <button className={message.feedback === "up" ? "active" : ""} onClick={() => feedback(message, "up")} aria-label={t("messageActions.helpful")}><ThumbsUp size={13} /></button>
-                            <button className={message.feedback === "down" ? "active" : ""} onClick={() => feedback(message, "down")} aria-label={t("messageActions.unhelpful")}><ThumbsDown size={13} /></button>
-                          </div>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                          {message.role === "assistant" && message.id !== "welcome" && (
+                            <div className="ciet-message-actions">
+                              <button onClick={() => copy(message)} aria-label={copied === message.id ? t("messageActions.copied") : t("messageActions.copy")}>{copied === message.id ? <Check size={13} /> : <Copy size={13} />}</button>
+                              <button onClick={() => submit(messages[index - 1]?.content ?? "", index - 1)} aria-label={t("messageActions.regenerate")}><RefreshCw size={13} /></button>
+                              <span />
+                              <button className={message.feedback === "up" ? "active" : ""} onClick={() => feedback(message, "up")} aria-label={t("messageActions.helpful")}><ThumbsUp size={13} /></button>
+                              <button className={message.feedback === "down" ? "active" : ""} onClick={() => feedback(message, "down")} aria-label={t("messageActions.unhelpful")}><ThumbsDown size={13} /></button>
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
                   {loading && (
                     <div className="ciet-message-row">
                       <span className="ciet-avatar"><Sparkles size={13} /></span>
@@ -444,22 +451,15 @@ export function Widget({ config }: { config: WidgetConfig }) {
                   )}
                   {error && <div className="ciet-error">{error}</div>}
                   {notice && <div className="ciet-notice" role="status">{t(`notices.${notice}`)}</div>}
+                  {translating && <div className="ciet-notice ciet-notice--translating" role="status">{t("notices.translating")}</div>}
                   <div ref={endRef} />
                 </div>
 
-                {messages.length <= 1 && (
-                  <div className="ciet-starters">
-                    <strong>{t("starters.title")}</strong>
-                    <div>{starterKeys.map((key) => {
-                      const prompt = t(`starters.${key}`);
-                      return <button key={key} onClick={() => submit(prompt)}>{prompt}</button>;
-                    })}</div>
+                {!messages.some((message) => message.role === "user") && (
+                  <div className="ciet-quick-actions">
+                    {actions.map(([key, Icon]) => <button key={key} onClick={() => submit(t(`actions.${key}.prompt`))}><Icon size={16} />{t(`actions.${key}.label`)}</button>)}
                   </div>
                 )}
-
-                <div className="ciet-quick-actions">
-                  {actions.map(([key, Icon]) => <button key={key} onClick={() => submit(t(`actions.${key}.prompt`))}><Icon size={14} />{t(`actions.${key}.label`)}</button>)}
-                </div>
                 <form className="ciet-composer" onSubmit={(event: FormEvent) => { event.preventDefault(); void submit(); }}>
                   <textarea ref={inputRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
@@ -476,8 +476,7 @@ export function Widget({ config }: { config: WidgetConfig }) {
                   <span>{t("footer.note")}</span>
                   {config.privacyUrl && <a href={config.privacyUrl} target="_blank" rel="noreferrer">{t("footer.privacy")}</a>}
                 </footer>
-              </>
-            )}
+            </>
           </section>
         )}
     </div>
